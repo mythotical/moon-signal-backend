@@ -1,7 +1,3 @@
-// decision_engine.js
-// Turns overlay metrics into an "APE / WAIT" decision with explainable reasons.
-// This is heuristic-based (MVP). You can tune thresholds later.
-
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
 export function computeDecision(overlay) {
@@ -9,76 +5,79 @@ export function computeDecision(overlay) {
   const rug = Number(overlay?.rug?.risk ?? 0);
   const liq = Number(overlay?.dexLiquidityUsd ?? 0);
   const vol = Number(overlay?.dexVolume24hUsd ?? 0);
-  const ch1h = Number(overlay?.priceChange1h ?? 0);
   const rising = overlay?.rising === true;
   const breakout = overlay?.breakout === true;
 
-  const reasons = [];
-  let confidence = 50;
+  const conv = overlay?.convergence || { status: "NONE", strength: 0, sCount: 0, aCount: 0 };
+  const trap = overlay?.liqTrap || { trap: false, severity: "LOW" };
+  const entry = overlay?.entryZone || { zone: "NEUTRAL", entryScore: 60 };
 
-  // Rug gating
+  const reasons = [];
+  let confidence = 55;
+
   if (rug >= 80) {
     return {
       action: "WAIT",
-      confidence: 95,
-      severity: "EXTREME",
-      reasons: ["EXTREME rug risk — do not ape", ...((overlay?.rug?.reasons || []).slice(0, 3))],
+      confidence: 98,
+      reasons: ["EXTREME rug risk — skip"],
       tags: ["RUG:EXTREME"]
     };
   }
-  if (rug >= 65) {
-    confidence -= 18;
-    reasons.push("High rug risk — size down / avoid");
-  } else if (rug <= 35) {
-    confidence += 10;
-    reasons.push("Rug risk looks reasonable");
-  }
 
-  // Score
+  if (rug <= 35) { confidence += 10; reasons.push("Rug risk reasonable"); }
+  else if (rug >= 65) { confidence -= 16; reasons.push("High rug risk"); }
+
+  if (trap.trap) { confidence -= (trap.severity === "HIGH" ? 20 : 12); reasons.push(`Liquidity trap (${trap.severity})`); }
+
   if (score >= 85) { confidence += 18; reasons.push("Alpha score very high"); }
   else if (score >= 78) { confidence += 10; reasons.push("Alpha score high"); }
   else if (score < 60) { confidence -= 12; reasons.push("Alpha score low"); }
 
-  // Momentum and confirmation
-  if (rising) { confidence += 10; reasons.push("Social velocity accelerating"); }
-  else { confidence -= 6; reasons.push("No clear social acceleration yet"); }
+  if (rising) { confidence += 10; reasons.push("Social velocity rising"); }
+  else { confidence -= 6; reasons.push("No social acceleration"); }
 
-  if (breakout) { confidence += 12; reasons.push("Breakout confirmation present"); }
-  else { confidence -= 6; reasons.push("No breakout confirmation yet"); }
+  if (breakout) { confidence += 12; reasons.push("Breakout confirmed"); }
+  else { confidence -= 6; reasons.push("No breakout confirmation"); }
 
-  // Liquidity / Volume sanity
+  if (conv.status === "STRONG") { confidence += 20; reasons.push(`Convergence STRONG (S:${conv.sCount} A:${conv.aCount})`); }
+  else if (conv.status === "MED") { confidence += 10; reasons.push("Convergence MED"); }
+  else if (conv.status === "WEAK") { confidence += 4; reasons.push("Convergence WEAK"); }
+  else { confidence -= 3; reasons.push("No convergence yet"); }
+
   if (liq >= 50000) { confidence += 10; reasons.push("Liquidity healthy"); }
   else if (liq >= 15000) { confidence += 4; reasons.push("Liquidity acceptable"); }
-  else { confidence -= 12; reasons.push("Liquidity low (slippage risk)"); }
+  else { confidence -= 12; reasons.push("Liquidity low"); }
 
   if (vol >= 250000) { confidence += 10; reasons.push("Volume strong"); }
   else if (vol >= 120000) { confidence += 6; reasons.push("Volume decent"); }
   else if (vol > 0 && vol < 60000) { confidence -= 8; reasons.push("Volume weak"); }
 
-  // Overextended warning
-  if (ch1h >= 35) { confidence -= 10; reasons.push("Overextended 1h move — chase risk"); }
-  else if (ch1h >= 12) { confidence -= 4; reasons.push("Fast 1h move — be careful"); }
+  if (entry.zone === "CHASE") { confidence -= 18; reasons.push("Entry = CHASE (overextended)"); }
+  else if (entry.zone === "EARLY") { confidence += 8; reasons.push("Entry = EARLY (better RR)"); }
 
   confidence = clamp(confidence, 1, 99);
 
-  // Final decision rule
-  // APE only if: good score + acceleration + acceptable rug + (breakout OR strong liq/vol)
   const ape =
     score >= 78 &&
     rug <= 60 &&
     rising &&
-    (breakout || (liq >= 50000 && vol >= 120000));
+    entry.zone !== "CHASE" &&
+    !trap.trap &&
+    (breakout || (liq >= 50000 && vol >= 120000)) &&
+    (conv.status === "STRONG" || conv.status === "MED");
 
   return {
     action: ape ? "APE" : "WAIT",
     confidence,
-    severity: rug >= 65 ? "HIGH" : rug >= 45 ? "MED" : "LOW",
-    reasons: reasons.slice(0, 6),
+    reasons: reasons.slice(0, 7),
     tags: [
       `SCORE:${score}`,
       `RUG:${rug}`,
       rising ? "ACCEL:ON" : "ACCEL:OFF",
-      breakout ? "BREAKOUT:ON" : "BREAKOUT:OFF"
+      breakout ? "BREAKOUT:ON" : "BREAKOUT:OFF",
+      `CONV:${conv.status}`,
+      trap.trap ? `TRAP:${trap.severity}` : "TRAP:OFF",
+      `ENTRY:${entry.zone}`
     ]
   };
 }
