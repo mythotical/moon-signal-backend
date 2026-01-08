@@ -1,5 +1,3 @@
-// rugrisk.js
-
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 function toNumOrNull(x) { const n = Number(x); return Number.isFinite(n) ? n : null; }
 
@@ -20,13 +18,11 @@ export function computeRugRiskFromDexPair(pair) {
   const reasons = [];
   let risk = 0;
 
-  // Liquidity
   if (liq <= 1000) { risk += 35; reasons.push("Very low liquidity"); }
   else if (liq <= 5000) { risk += 25; reasons.push("Low liquidity"); }
   else if (liq <= 20000) { risk += 15; reasons.push("Thin liquidity"); }
   else { risk += 5; reasons.push("Liquidity OK"); }
 
-  // FDV/MCAP vs liquidity
   const cap = fdv || mcap || 0;
   if (cap > 0 && liq > 0) {
     const ratio = cap / liq;
@@ -39,7 +35,6 @@ export function computeRugRiskFromDexPair(pair) {
     reasons.push("FDV/MCAP missing");
   }
 
-  // Volume/liquidity
   if (liq > 0) {
     const vRatio = vol24 / liq;
     if (vRatio >= 20) { risk += 18; reasons.push("Volume/liquidity suspiciously high"); }
@@ -48,7 +43,6 @@ export function computeRugRiskFromDexPair(pair) {
     else { risk += 3; reasons.push("Volume/liquidity normal"); }
   }
 
-  // Extreme movement
   if (typeof pc1h === "number") {
     if (pc1h >= 300) { risk += 14; reasons.push("1h pump extreme"); }
     else if (pc1h >= 150) { risk += 10; reasons.push("1h pump large"); }
@@ -63,7 +57,6 @@ export function computeRugRiskFromDexPair(pair) {
     else if (pc24h <= -85) { risk += 10; reasons.push("24h dump extreme"); }
   }
 
-  // Age
   if (typeof ageMin === "number") {
     if (ageMin <= 10) { risk += 18; reasons.push("Pair is extremely new"); }
     else if (ageMin <= 60) { risk += 12; reasons.push("Pair is new"); }
@@ -74,7 +67,6 @@ export function computeRugRiskFromDexPair(pair) {
     reasons.push("Pair age unknown");
   }
 
-  // Buy/sell pressure (if available)
   const total1h = buys1h + sells1h;
   if (total1h >= 10) {
     const sellShare = sells1h / Math.max(1, total1h);
