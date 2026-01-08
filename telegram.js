@@ -1,26 +1,16 @@
-export function createTelegramWatcher({
-  botToken,
-  pollMs = 3000,
-  allowedChats = [],
-  onVelocity,
-  onSignal
-}) {
+export function createTelegramWatcher({ botToken, pollMs = 3000, allowedChats = [], onVelocity, onSignal }) {
   let timer = null;
   let offset = 0;
-
-  // rolling velocity window
-  const hits = []; // timestamps of “token mention” events
+  const hits = [];
 
   function bumpVelocity() {
     const now = Date.now();
-    // keep last 5 minutes
     while (hits.length && now - hits[0] > 5 * 60 * 1000) hits.shift();
-    const v = hits.length; // mentions/5min
-    onVelocity?.(Math.min(100, v * 2)); // convert to 0..100-ish
+    const v = hits.length;
+    onVelocity?.(Math.min(100, v * 2));
   }
 
   function extractTickers(text) {
-    // $PEPE, $BONK, etc (2-12 chars)
     const m = text.match(/\$[A-Za-z0-9]{2,12}/g);
     return (m || []).map((x) => x.toUpperCase());
   }
@@ -30,12 +20,10 @@ export function createTelegramWatcher({
       const url = `https://api.telegram.org/bot${botToken}/getUpdates?timeout=30&offset=${offset}`;
       const res = await fetch(url);
       const json = await res.json();
-
       if (!json?.ok || !Array.isArray(json.result)) return;
 
       for (const upd of json.result) {
         offset = Math.max(offset, (upd.update_id || 0) + 1);
-
         const msg = upd.message || upd.channel_post;
         if (!msg) continue;
 
@@ -56,14 +44,10 @@ export function createTelegramWatcher({
           type: "Telegram",
           token,
           chain: "SOCIAL",
-          walletTier: null,
-          scoreHints: { socialVelocity: 60 },
           message: `Telegram mention: ${tickers.join(" ")}`
         });
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   return {
