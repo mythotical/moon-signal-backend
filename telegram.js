@@ -1,122 +1,81 @@
-// watchers/telegram.js
-
-export function createTelegramWatcher({ botToken, pollMs, allowedChats, onSignal, onVelocity }) {
-  if (!botToken) {
-    console.log("⚠️ TELEGRAM_BOT_TOKEN missing. Telegram watcher disabled.");
-    return { start() {}, stop() {} };
-  }
-
-  const allowed = new Set((allowedChats || []).filter(Boolean).map(String));
+export function createTelegramWatcher({
+  botToken,
+  pollMs = 3000,
+  allowedChats = [],
+  onVelocity,
+  onSignal
+}) {
   let timer = null;
   let offset = 0;
 
-  // Velocity tracking: mentions in last 10 minutes
-  const mentionWindowMs = 10 * 60 * 1000;
-  const mentions = new Map(); // key -> timestamps[]
+  // rolling velocity window
+  const hits = []; // timestamps of “token mention” events
 
-  function addMention(key) {
+  function bumpVelocity() {
     const now = Date.now();
-    const arr = mentions.get(key) || [];
-    arr.push(now);
-
-    while (arr.length && now - arr[0] > mentionWindowMs) arr.shift();
-    mentions.set(key, arr);
-
-    const v = Math.min(100, arr.length * 10);
-    if (typeof onVelocity === "function") onVelocity(v, key);
-    return v;
+    // keep last 5 minutes
+    while (hits.length && now - hits[0] > 5 * 60 * 1000) hits.shift();
+    const v = hits.length; // mentions/5min
+    onVelocity?.(Math.min(100, v * 2)); // convert to 0..100-ish
   }
 
-  function extractMentions(text) {
-    const out = new Set();
-    const t = text || "";
-
-    // $TICKER patterns
-    for (const m of t.matchAll(/\$([A-Za-z0-9_]{2,12})/g)) {
-      out.add(`$${m[1].toUpperCase()}`);
-    }
-
-    // rough Solana mint-like base58 strings
-    for (const m of t.matchAll(/\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g)) {
-      out.add(m[0]);
-    }
-
-    return [...out];
+  function extractTickers(text) {
+    // $PEPE, $BONK, etc (2-12 chars)
+    const m = text.match(/\$[A-Za-z0-9]{2,12}/g);
+    return (m || []).map((x) => x.toUpperCase());
   }
 
-  async function tg(method, params) {
-    const url = `https://api.telegram.org/bot${botToken}/${method}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(params || {})
-    });
-    if (!res.ok) throw new Error(`Telegram HTTP ${res.status}`);
-
-    const json = await res.json();
-    if (!json.ok) throw new Error("Telegram API error");
-    return json.result;
-  }
-
-  async function tick() {
+  async function poll() {
     try {
-      const updates = await tg("getUpdates", {
-        timeout: 0,
-        offset,
-        allowed_updates: ["message", "channel_post"]
-      });
+      const url = `https://api.telegram.org/bot${botToken}/getUpdates?timeout=30&offset=${offset}`;
+      const res = await fetch(url);
+      const json = await res.json();
 
-      for (const u of updates) {
-        offset = Math.max(offset, (u.update_id || 0) + 1);
+      if (!json?.ok || !Array.isArray(json.result)) return;
 
-        const msg = u.message || u.channel_post;
+      for (const upd of json.result) {
+        offset = Math.max(offset, (upd.update_id || 0) + 1);
+
+        const msg = upd.message || upd.channel_post;
         if (!msg) continue;
 
         const chatId = String(msg.chat?.id ?? "");
-        if (allowed.size && !allowed.has(chatId)) continue;
+        if (allowedChats.length && !allowedChats.includes(chatId)) continue;
 
-        const text = msg.text || msg.caption || "";
+        const text = (msg.text || msg.caption || "").trim();
         if (!text) continue;
 
-        const who = msg.from?.username
-          ? `@${msg.from.username}`
-          : (msg.chat?.title || "telegram");
+        const tickers = extractTickers(text);
+        if (!tickers.length) continue;
 
-        const keys = extractMentions(text);
+        hits.push(Date.now());
+        bumpVelocity();
 
-        if (!keys.length) {
-          onSignal({
-            type: "Telegram",
-            scoreHints: { socialVelocity: 20 },
-            message: `TG ${who}: ${text.slice(0, 180)}`,
-            reasons: ["Telegram message", "No token detected"]
-          });
-          continue;
-        }
-
-        for (const k of keys) {
-          const v = addMention(k);
-          onSignal({
-            type: "Telegram Spike",
-            token: k,
-            chain: "SOCIAL",
-            scoreHints: { socialVelocity: v },
-            message: `TG ${who}: ${text.slice(0, 180)}`,
-            reasons: ["Telegram mention", `Velocity ${Math.round(v)}/100`]
-          });
-        }
+        const token = tickers[0].replace("$", "");
+        onSignal?.({
+          type: "Telegram",
+          token,
+          chain: "SOCIAL",
+          walletTier: null,
+          scoreHints: { socialVelocity: 60 },
+          message: `Telegram mention: ${tickers.join(" ")}`
+        });
       }
     } catch {
-      // keep alive
+      // ignore
     }
   }
 
   return {
     start() {
+      if (!botToken) {
+        console.log("⚠️ TELEGRAM_BOT_TOKEN missing. Telegram watcher disabled.");
+        return;
+      }
       if (timer) return;
-      timer = setInterval(tick, pollMs);
-      tick();
-      console.log(`✅ Telegram watcher armed (${pollMs}ms)`);
+      console.log("✅ Telegram watcher armed");
+      timer = setInterval(poll, pollMs);
+      poll();
     },
     stop() {
       if (timer) clearInterval(timer);
