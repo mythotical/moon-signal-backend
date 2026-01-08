@@ -1,7 +1,3 @@
-// advanced_metrics.js
-// Adds: wallet convergence + liquidity trap + entry zone.
-// NOW ALSO exposes listTop() for the Convergence Map page.
-
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
 export function createConvergenceTracker({ windowMs = 12 * 60 * 1000 } = {}) {
@@ -33,6 +29,7 @@ export function createConvergenceTracker({ windowMs = 12 * 60 * 1000 } = {}) {
 
     const uniqS = new Set();
     const uniqA = new Set();
+
     for (const x of arr) {
       if (x.tier === "S") uniqS.add(x.wallet);
       if (x.tier === "A") uniqA.add(x.wallet);
@@ -51,14 +48,12 @@ export function createConvergenceTracker({ windowMs = 12 * 60 * 1000 } = {}) {
       sCount >= 2 ? "STRONG" :
       (sCount >= 1 && aCount >= 2) ? "STRONG" :
       (sCount >= 1 || aCount >= 2) ? "MED" :
-      (total >= 1) ? "WEAK" :
-      "NONE";
+      (total >= 1) ? "WEAK" : "NONE";
 
     return { token: t, status, strength, sCount, aCount, total };
   }
 
-  function listTop(limit = 25) {
-    // prune + compute scores
+  function listTop(limit = 30) {
     const out = [];
     for (const token of hits.keys()) {
       const g = get(token);
@@ -97,10 +92,7 @@ export function computeEntryZone({ priceChange1h, priceChange24h }) {
   const ch1h = Number(priceChange1h ?? 0);
   const ch24 = Number(priceChange24h ?? 0);
 
-  const chase =
-    ch1h >= 25 ||
-    (ch1h >= 18 && ch24 >= 80);
-
+  const chase = ch1h >= 25 || (ch1h >= 18 && ch24 >= 80);
   const early = ch1h <= 8 && ch24 <= 45;
 
   let zone = "NEUTRAL";
