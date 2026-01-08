@@ -1,3 +1,4 @@
+// watchers/dexscreener.js
 export function createDexscreenerClient() {
   async function fetchJson(url) {
     const res = await fetch(url, { headers: { accept: "application/json" } });
@@ -23,6 +24,20 @@ export function createDexscreenerClient() {
     }
   }
 
+  // 🔥 NEW: search endpoint for enrichment
+  async function searchPairs(q) {
+    const url = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(q)}`;
+    try {
+      const json = await fetchJson(url);
+      const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
+      // sort best first
+      pairs.sort((a, b) => (b?.liquidity?.usd ?? 0) - (a?.liquidity?.usd ?? 0));
+      return pairs;
+    } catch {
+      return [];
+    }
+  }
+
   function parseDexUrl(url) {
     try {
       const u = new URL(url);
@@ -32,5 +47,5 @@ export function createDexscreenerClient() {
     return null;
   }
 
-  return { fetchPair, parseDexUrl };
+  return { fetchPair, parseDexUrl, searchPairs };
 }
