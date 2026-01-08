@@ -14,6 +14,9 @@ import { scoreSignal, buildReasons } from "./scoring.js";
 import { computeRugRiskFromDexPair } from "./rugrisk.js";
 import { createWalletRanker } from "./wallet_rank.js";
 
+import { createVelocityTracker } from "./velocity.js";
+import { createOutcomeTracker } from "./outcomes.js";
+
 const PORT = Number(process.env.PORT || 8080);
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY || "";
@@ -29,11 +32,16 @@ const X_HANDLES = (process.env.X_HANDLES || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// High Conviction Filters (tune later)
+// High Conviction Filters (tune)
 const MIN_SCORE_HC = Number(process.env.MIN_SCORE_HC || 78);
 const MAX_RUG_HC = Number(process.env.MAX_RUG_HC || 60);
 const MIN_LIQ_HC = Number(process.env.MIN_LIQ_HC || 15000);
 const MIN_SOCIAL_HC = Number(process.env.MIN_SOCIAL_HC || 25);
+
+// NEW: acceleration gating
+const REQUIRE_ACCEL = (process.env.REQUIRE_ACCEL || "1") === "1";
+const ACCEL_MIN_DELTA = Number(process.env.ACCEL_MIN_DELTA || 6);
+const ACCEL_MIN_NOW = Number(process.env.ACCEL_MIN_NOW || 20);
 
 const DEX_REFRESH_MS = Number(process.env.DEX_REFRESH_MS || 15000);
 
@@ -46,6 +54,7 @@ try {
 }
 
 const walletRank = createWalletRanker();
+const velocity = createVelocityTracker({ windowSize: 10 });
 
 const app = express();
 app.use(cors());
@@ -55,7 +64,6 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 const latestSignals = [];
-let lastSocialVelocity = 0;
 
 function broadcast(obj) {
   const msg = JSON.stringify(obj);
@@ -65,39 +73,38 @@ function broadcast(obj) {
 }
 
 function isHighConviction(signal) {
-  // Only alert hard if it passes these gates
   const scoreOk = typeof signal.score === "number" && signal.score >= MIN_SCORE_HC;
 
-  // Rug gate (if we have it)
-  const rug = signal.rug;
-  const rugOk = !rug || typeof rug.risk !== "number" || rug.risk <= MAX_RUG_HC;
+  const rugOk = !signal.rug || typeof signal.rug.risk !== "number" || signal.rug.risk <= MAX_RUG_HC;
 
-  // Liquidity gate (if present)
-  const liqOk = signal.dexLiquidityUsd == null || signal.dexLiquidityUsd >= MIN_LIQ_HC;
+  const liqOk =
+    signal.dexLiquidityUsd == null || (typeof signal.dexLiquidityUsd === "number" && signal.dexLiquidityUsd >= MIN_LIQ_HC);
 
-  // Social velocity gate (if present)
-  const socialOk =
-    (signal.socialVelocity == null ? lastSocialVelocity : signal.socialVelocity) >= MIN_SOCIAL_HC;
+  const socialNow = typeof signal.socialVelocity === "number" ? signal.socialVelocity : velocity.current();
+  const socialOk = socialNow >= MIN_SOCIAL_HC;
 
-  // If it’s a wallet signal, require A/S tier
+  // Wallet signals must be A/S
   const tier = signal.walletTier;
   const tierOk = !tier || tier === "S" || tier === "A";
 
-  return scoreOk && rugOk && liqOk && socialOk && tierOk;
+  const accelOk = !REQUIRE_ACCEL || velocity.isRising({ minDelta: ACCEL_MIN_DELTA, minNow: ACCEL_MIN_NOW });
+
+  return scoreOk && rugOk && liqOk && socialOk && tierOk && accelOk;
 }
 
 function pushSignal(raw) {
-  // Auto-rank wallet tier based on behavior (if wallet provided)
   let walletTier = raw?.walletTier || null;
+
+  // If wallet present, auto-rank tier based on behavior
   if (raw?.wallet) {
     const w = walletRank.noteActivity(raw.wallet, raw.token);
-    walletTier = w.tier; // override with computed tier
+    walletTier = w.tier;
   }
 
   const socialVelocity =
     typeof raw?.scoreHints?.socialVelocity === "number"
       ? raw.scoreHints.socialVelocity
-      : lastSocialVelocity;
+      : velocity.current();
 
   const dexLiquidityUsd = raw?.dexLiquidityUsd ?? null;
   const dexVolume24hUsd = raw?.dexVolume24hUsd ?? null;
@@ -143,59 +150,58 @@ function pushSignal(raw) {
   latestSignals.unshift(s);
   latestSignals.splice(200);
 
-  // WebSocket: send ALL signals but your extension will notify only on highConviction
   broadcast(s);
 }
 
-// Websocket connects
+// WS connect
 wss.on("connection", (ws) => {
-  ws.send(
-    JSON.stringify({
-      type: "System",
-      token: "MOON",
-      score: 100,
-      highConviction: false,
-      message: "✅ Connected to Moon Signal (live backend)"
-    })
-  );
+  ws.send(JSON.stringify({
+    type: "System",
+    token: "MOON",
+    score: 100,
+    message: "✅ Connected to Moon Signal (live backend)"
+  }));
 });
 
 // Routes
 app.get("/", (req, res) => res.send("Moon Signal backend OK"));
 
-app.get("/feed", (req, res) => {
-  // Return all recent signals; UI can filter if it wants
-  res.json(latestSignals.slice(0, 20));
-});
+app.get("/feed", (req, res) => res.json(latestSignals.slice(0, 20)));
 
-// High conviction feed
 app.get("/feed/hc", (req, res) => {
   res.json(latestSignals.filter((s) => s.highConviction).slice(0, 20));
 });
 
-// Wallet leaderboard
-app.get("/wallets/top", (req, res) => {
-  res.json(walletRank.topWallets(20));
+app.get("/wallets/top", (req, res) => res.json(walletRank.topWallets(20)));
+
+app.get("/debug/velocity", (req, res) => {
+  res.json({ now: velocity.current(), rising: velocity.isRising(), slope: velocity.slope(), samples: velocity.debug() });
 });
 
-// One-click test (guaranteed HC so you can validate)
+// HC test signal
 app.get("/test-signal", (req, res) => {
+  velocity.push(30);
+  velocity.push(38);
+  velocity.push(46);
+
   pushSignal({
     type: "Test",
     token: "MOONCAT",
     chain: "SOL",
     walletTier: "S",
-    scoreHints: { socialVelocity: 80 },
+    socialVelocity: velocity.current(),
+    scoreHints: { socialVelocity: velocity.current() },
     dexLiquidityUsd: 50000,
     message: "🚀 Test HC signal fired (live)",
-    rug: { risk: 25, level: "LOW", reasons: ["Demo safe"] },
-    reasons: ["HC test", "Feed OK", "WS OK"]
+    rug: { risk: 25, level: "LOW", reasons: ["Demo safe"] }
   });
+
   res.json({ ok: true });
 });
 
 const dex = createDexscreenerClient();
 const dexCache = new Map();
+
 function cacheGet(k) {
   const v = dexCache.get(k);
   if (!v) return null;
@@ -206,6 +212,15 @@ function cacheSet(k, data) {
   dexCache.set(k, { ts: Date.now(), data });
 }
 
+const outcomes = createOutcomeTracker({
+  dexClient: dex,
+  walletRanker: walletRank,
+  onNote: (type, meta) => {
+    // optional: log
+    console.log(`📈 Outcome ${type}`, meta);
+  }
+});
+
 // Overlay (Dexscreener + Rug Risk)
 app.get("/overlay", async (req, res) => {
   const url = String(req.query.url || "");
@@ -214,12 +229,7 @@ app.get("/overlay", async (req, res) => {
   const rugEmpty = { risk: 0, level: "—", reasons: ["No pair data"] };
 
   if (!ctx) {
-    return res.json({
-      token: "Unknown",
-      score: 0,
-      reasons: ["Not a Dexscreener URL"],
-      rug: rugEmpty
-    });
+    return res.json({ token: "Unknown", score: 0, reasons: ["Not a Dexscreener URL"], rug: rugEmpty });
   }
 
   const key = `${ctx.chain}:${ctx.id}`;
@@ -228,7 +238,6 @@ app.get("/overlay", async (req, res) => {
 
   try {
     const pair = await dex.fetchPair(ctx.chain, ctx.id);
-
     if (!pair) {
       const out = { token: "Unknown", score: 0, reasons: ["Pair not found"], rug: rugEmpty };
       cacheSet(key, out);
@@ -245,7 +254,7 @@ app.get("/overlay", async (req, res) => {
 
     const score = scoreSignal({
       walletTier: null,
-      socialVelocity: lastSocialVelocity,
+      socialVelocity: velocity.current(),
       dexLiquidityUsd,
       dexVolume24hUsd,
       priceChange1h,
@@ -254,7 +263,7 @@ app.get("/overlay", async (req, res) => {
 
     const reasons = buildReasons({
       walletTier: null,
-      socialVelocity: lastSocialVelocity,
+      socialVelocity: velocity.current(),
       dexLiquidityUsd,
       dexVolume24hUsd,
       priceChange1h,
@@ -270,7 +279,9 @@ app.get("/overlay", async (req, res) => {
       dexLiquidityUsd,
       dexVolume24hUsd,
       priceChange1h,
-      priceChange24h
+      priceChange24h,
+      socialVelocity: velocity.current(),
+      rising: velocity.isRising({ minDelta: ACCEL_MIN_DELTA, minNow: ACCEL_MIN_NOW })
     };
 
     cacheSet(key, out);
@@ -287,26 +298,45 @@ const solWatcher = createHeliusWatcher({
   apiKey: HELIUS_API_KEY,
   pollMs: Number(process.env.SOL_POLL_MS || 8000),
   walletsByTier,
-  onSignal: pushSignal
+  onSignal: (sig) => {
+    // if wallet signal includes dexUrl later, outcomes can arm
+    pushSignal(sig);
+  }
 });
 
 const tgWatcher = createTelegramWatcher({
   botToken: TELEGRAM_BOT_TOKEN,
   pollMs: Number(process.env.TELEGRAM_POLL_MS || 3000),
   allowedChats: TELEGRAM_ALLOWED_CHATS,
-  onVelocity: (v) => (lastSocialVelocity = v),
-  onSignal: pushSignal
+  onVelocity: (v) => {
+    velocity.push(v);
+  },
+  onSignal: (sig) => {
+    // Social mention also updates velocity through onVelocity
+    pushSignal(sig);
+  }
 });
 
 const xWatcher = createXWatcher({
   bearerToken: X_BEARER_TOKEN,
   handles: X_HANDLES,
   pollMs: Number(process.env.X_POLL_MS || 20000),
-  onSocialVelocity: (v) => (lastSocialVelocity = v),
-  onSignal: pushSignal
+  onSocialVelocity: (v) => velocity.push(v),
+  onSignal: (sig) => pushSignal(sig)
 });
 
-// Start (Render requires 0.0.0.0)
+// NEW: endpoint to arm outcomes from extension (wallet + dexscreener url)
+app.post("/arm-outcome", async (req, res) => {
+  const wallet = String(req.body?.wallet || "");
+  const dexUrl = String(req.body?.dexUrl || "");
+
+  if (!wallet || !dexUrl) return res.status(400).json({ ok: false, error: "wallet and dexUrl required" });
+
+  const ok = await outcomes.armFromSignal({ wallet, dexUrl });
+  res.json({ ok, stats: outcomes.stats() });
+});
+
+// Start
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Listening on port ${PORT}`);
   solWatcher.start();
@@ -317,6 +347,6 @@ server.listen(PORT, "0.0.0.0", () => {
     type: "System",
     token: "MOON",
     chain: "LIVE",
-    message: "Backend online: High-Conviction + RugRisk + Wallet Auto-Rank"
+    message: "Backend online: HC accel + RugRisk + Wallet auto-rank outcomes"
   });
 });
