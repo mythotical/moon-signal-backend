@@ -6,14 +6,12 @@ export function createDexscreenerClient() {
   }
 
   async function fetchPair(chain, id) {
-    // 1) pair by chain + pairId
     const pairUrl = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(chain)}/${encodeURIComponent(id)}`;
     try {
       const json = await fetchJson(pairUrl);
       if (json?.pair) return json.pair;
     } catch {}
 
-    // 2) fallback: treat id as token address (token pools)
     const tokenPoolsUrl = `https://api.dexscreener.com/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(id)}`;
     try {
       const pools = await fetchJson(tokenPoolsUrl);
