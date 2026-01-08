@@ -201,6 +201,12 @@ app.get("/debug/velocity", (req, res) => res.json({
   rising: velocity.isRising({ minDelta: ACCEL_MIN_DELTA, minNow: ACCEL_MIN_NOW }),
   slope: velocity.slope(),
   samples: velocity.debug()
+// Convergence Map endpoint (extension uses this)
+app.get("/convergence", (req, res) => {
+  const limit = Number(req.query.limit || 25);
+  res.json({ tokens: convergence.listTop(limit) });
+});
+
 }));
 
 // Overlay (Dex)
