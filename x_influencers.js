@@ -1,25 +1,13 @@
-export function createXWatcher({ bearerToken, handles, pollMs, onSignal, onSocialVelocity }) {
-  if (!bearerToken || !handles.length) {
-    console.log("⚠️ X watcher disabled (missing token or handles)");
-    return { start() {}, stop() {} };
-  }
-
-  let timer = null;
-
-  async function tick() {
-    // placeholder: real logic runs once token is added
-    onSocialVelocity(10);
-  }
-
+export function createXWatcher({ bearerToken, handles = [], pollMs = 20000, onSocialVelocity, onSignal }) {
   return {
     start() {
-      if (timer) return;
-      timer = setInterval(tick, pollMs);
-      console.log("✅ X watcher armed");
+      if (!bearerToken || !handles.length) {
+        console.log("⚠️ X watcher disabled (missing token or handles)");
+        return;
+      }
+      console.log("✅ X watcher armed (stub) — add real implementation next");
+      // leaving stub so deploy never breaks
     },
-    stop() {
-      if (timer) clearInterval(timer);
-      timer = null;
-    }
+    stop() {}
   };
 }
