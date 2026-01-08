@@ -12,6 +12,7 @@ import { createDexscreenerClient } from "./watchers/dexscreener.js";
 
 import { scoreSignal, buildReasons } from "./scoring.js";
 import { computeRugRiskFromDexPair } from "./rugrisk.js";
+import { createWalletRanker } from "./wallet_rank.js";
 
 const PORT = Number(process.env.PORT || 8080);
 
@@ -28,6 +29,12 @@ const X_HANDLES = (process.env.X_HANDLES || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
+// High Conviction Filters (tune later)
+const MIN_SCORE_HC = Number(process.env.MIN_SCORE_HC || 78);
+const MAX_RUG_HC = Number(process.env.MAX_RUG_HC || 60);
+const MIN_LIQ_HC = Number(process.env.MIN_LIQ_HC || 15000);
+const MIN_SOCIAL_HC = Number(process.env.MIN_SOCIAL_HC || 25);
+
 const DEX_REFRESH_MS = Number(process.env.DEX_REFRESH_MS || 15000);
 
 let walletsByTier = { S: [], A: [], B: [], C: [] };
@@ -37,6 +44,8 @@ try {
 } catch {
   console.log("⚠️ wallets.json missing/invalid.");
 }
+
+const walletRank = createWalletRanker();
 
 const app = express();
 app.use(cors());
@@ -55,8 +64,35 @@ function broadcast(obj) {
   }
 }
 
+function isHighConviction(signal) {
+  // Only alert hard if it passes these gates
+  const scoreOk = typeof signal.score === "number" && signal.score >= MIN_SCORE_HC;
+
+  // Rug gate (if we have it)
+  const rug = signal.rug;
+  const rugOk = !rug || typeof rug.risk !== "number" || rug.risk <= MAX_RUG_HC;
+
+  // Liquidity gate (if present)
+  const liqOk = signal.dexLiquidityUsd == null || signal.dexLiquidityUsd >= MIN_LIQ_HC;
+
+  // Social velocity gate (if present)
+  const socialOk =
+    (signal.socialVelocity == null ? lastSocialVelocity : signal.socialVelocity) >= MIN_SOCIAL_HC;
+
+  // If it’s a wallet signal, require A/S tier
+  const tier = signal.walletTier;
+  const tierOk = !tier || tier === "S" || tier === "A";
+
+  return scoreOk && rugOk && liqOk && socialOk && tierOk;
+}
+
 function pushSignal(raw) {
-  const walletTier = raw?.walletTier || null;
+  // Auto-rank wallet tier based on behavior (if wallet provided)
+  let walletTier = raw?.walletTier || null;
+  if (raw?.wallet) {
+    const w = walletRank.noteActivity(raw.wallet, raw.token);
+    walletTier = w.tier; // override with computed tier
+  }
 
   const socialVelocity =
     typeof raw?.scoreHints?.socialVelocity === "number"
@@ -93,11 +129,21 @@ function pushSignal(raw) {
     ts: Date.now(),
     score,
     reasons,
+    walletTier,
+    socialVelocity,
+    dexLiquidityUsd,
+    dexVolume24hUsd,
+    priceChange1h,
+    priceChange24h,
     ...raw
   };
 
+  s.highConviction = isHighConviction(s);
+
   latestSignals.unshift(s);
   latestSignals.splice(200);
+
+  // WebSocket: send ALL signals but your extension will notify only on highConviction
   broadcast(s);
 }
 
@@ -108,6 +154,7 @@ wss.on("connection", (ws) => {
       type: "System",
       token: "MOON",
       score: 100,
+      highConviction: false,
       message: "✅ Connected to Moon Signal (live backend)"
     })
   );
@@ -117,19 +164,32 @@ wss.on("connection", (ws) => {
 app.get("/", (req, res) => res.send("Moon Signal backend OK"));
 
 app.get("/feed", (req, res) => {
+  // Return all recent signals; UI can filter if it wants
   res.json(latestSignals.slice(0, 20));
 });
 
-// One-click test
+// High conviction feed
+app.get("/feed/hc", (req, res) => {
+  res.json(latestSignals.filter((s) => s.highConviction).slice(0, 20));
+});
+
+// Wallet leaderboard
+app.get("/wallets/top", (req, res) => {
+  res.json(walletRank.topWallets(20));
+});
+
+// One-click test (guaranteed HC so you can validate)
 app.get("/test-signal", (req, res) => {
   pushSignal({
     type: "Test",
     token: "MOONCAT",
     chain: "SOL",
-    walletTier: "A",
-    scoreHints: { socialVelocity: 60 },
-    message: "🚀 Test signal fired (live)",
-    reasons: ["Feed OK", "WS OK"]
+    walletTier: "S",
+    scoreHints: { socialVelocity: 80 },
+    dexLiquidityUsd: 50000,
+    message: "🚀 Test HC signal fired (live)",
+    rug: { risk: 25, level: "LOW", reasons: ["Demo safe"] },
+    reasons: ["HC test", "Feed OK", "WS OK"]
   });
   res.json({ ok: true });
 });
@@ -146,7 +206,7 @@ function cacheSet(k, data) {
   dexCache.set(k, { ts: Date.now(), data });
 }
 
-// Real overlay (Dexscreener + rug risk)
+// Overlay (Dexscreener + Rug Risk)
 app.get("/overlay", async (req, res) => {
   const url = String(req.query.url || "");
   const ctx = dex.parseDexUrl(url);
@@ -181,6 +241,8 @@ app.get("/overlay", async (req, res) => {
     const priceChange1h = pair?.priceChange?.h1 ?? null;
     const priceChange24h = pair?.priceChange?.h24 ?? null;
 
+    const rug = computeRugRiskFromDexPair(pair);
+
     const score = scoreSignal({
       walletTier: null,
       socialVelocity: lastSocialVelocity,
@@ -199,9 +261,18 @@ app.get("/overlay", async (req, res) => {
       priceChange24h
     });
 
-    const rug = computeRugRiskFromDexPair(pair);
+    const out = {
+      token,
+      score,
+      reasons,
+      pairUrl: pair.url,
+      rug,
+      dexLiquidityUsd,
+      dexVolume24hUsd,
+      priceChange1h,
+      priceChange24h
+    };
 
-    const out = { token, score, reasons, pairUrl: pair.url, rug };
     cacheSet(key, out);
     return res.json(out);
   } catch {
@@ -242,11 +313,10 @@ server.listen(PORT, "0.0.0.0", () => {
   tgWatcher.start();
   xWatcher.start();
 
-  // Seed
   pushSignal({
     type: "System",
     token: "MOON",
     chain: "LIVE",
-    message: "Backend online: Dex overlay + RugRisk + Telegram + Helius"
+    message: "Backend online: High-Conviction + RugRisk + Wallet Auto-Rank"
   });
 });
