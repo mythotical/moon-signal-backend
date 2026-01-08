@@ -1,7 +1,4 @@
 // watchers/helius_solana.js
-// Minimal wallet activity watcher using Helius RPC + parsed tx endpoint.
-// Emits a signal when a tracked wallet gets a new tx.
-
 export function createHeliusWatcher({
   apiKey,
   pollMs = 8000,
@@ -61,13 +58,10 @@ export function createHeliusWatcher({
     if (!latest) return;
 
     const prev = seen.get(address);
-
-    // first run: set baseline, don’t spam
     if (!prev) {
       seen.set(address, latest);
       return;
     }
-
     if (prev === latest) return;
     seen.set(address, latest);
 
@@ -81,17 +75,15 @@ export function createHeliusWatcher({
       type: "Wallet",
       chain: "SOL",
       token: token || "SOL",
+      wallet: address,
       walletTier: tier,
       message: `Tracked wallet activity (${tier}) — ${address.slice(0, 4)}…${address.slice(-4)}`
     });
   }
 
   async function tick() {
-    // sequential so you don’t get rate limited instantly
     for (const w of allWallets) {
-      try {
-        await tickOne(w);
-      } catch {}
+      try { await tickOne(w); } catch {}
     }
   }
 
