@@ -18,10 +18,23 @@ export function computeRugRiskFromDexPair(pair) {
   }
 
   // volume without liquidity can be a trap (counts toward risk too)
-  if (vol24 >= 300000 && liqUsd < 25000) { risk += 15; reasons.push("High vol without liquidity support"); }
+  if (vol24 >= 300000 && liqUsd < 25000) {
+    risk += 15;
+    reasons.push("High vol without liquidity support");
+  }
 
   risk = Math.max(0, Math.min(100, risk));
-  const level = risk >= 80 ? "EXTREME" : risk >= 65 ? "HIGH" : risk >= 45 ? "MED" : "LOW";
 
-  return { risk, level, reasons };
+  // "Hard" rug conditions (heuristic). Real hard-fails will be added in Phase 2 (LP lock/ownership, taxes, etc).
+  const hardFail =
+    risk >= 85 ||
+    liqUsd < 5000 ||
+    (fdv > 0 && liqUsd > 0 && fdv / liqUsd > 500);
+
+  const level =
+    hardFail ? "HARD" :
+    risk >= 65 ? "HIGH" :
+    risk >= 45 ? "MED" : "LOW";
+
+  return { risk, level, hardFail, reasons };
 }
