@@ -2,7 +2,8 @@ function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
 export function computeDecision(overlay) {
   const score = Number(overlay?.score ?? 0);
-  const rug = Number(overlay?.rug?.risk ?? 0);
+  const rugRisk = Number(overlay?.rug?.risk ?? overlay?.rug ?? 0);
+
   const liq = Number(overlay?.dexLiquidityUsd ?? 0);
   const vol = Number(overlay?.dexVolume24hUsd ?? 0);
   const rising = overlay?.rising === true;
@@ -15,19 +16,25 @@ export function computeDecision(overlay) {
   const reasons = [];
   let confidence = 55;
 
-  if (rug >= 80) {
+  // Always honor hard rug risk (Phase 1 heuristic hard fail)
+  if (overlay?.rug?.hardFail === true || rugRisk >= 90) {
     return {
-      action: "WAIT",
-      confidence: 98,
-      reasons: ["EXTREME rug risk — skip"],
-      tags: ["RUG:EXTREME"]
+      action: "RUG_WARNING",
+      confidence: 99,
+      score,
+      rug: rugRisk,
+      reasons: ["Hard rug conditions detected", ...(overlay?.rug?.reasons || [])].slice(0, 6),
+      tags: ["RUG:HARD", `SCORE:${score}`, `RUG:${rugRisk}`]
     };
   }
 
-  if (rug <= 35) { confidence += 10; reasons.push("Rug risk reasonable"); }
-  else if (rug >= 65) { confidence -= 16; reasons.push("High rug risk"); }
+  if (rugRisk <= 35) { confidence += 10; reasons.push("Rug risk reasonable"); }
+  else if (rugRisk >= 65) { confidence -= 16; reasons.push("High rug risk"); }
 
-  if (trap.trap) { confidence -= (trap.severity === "HIGH" ? 20 : 12); reasons.push(`Liquidity trap (${trap.severity})`); }
+  if (trap.trap) {
+    confidence -= (trap.severity === "HIGH" ? 20 : 12);
+    reasons.push(`Liquidity trap (${trap.severity})`);
+  }
 
   if (score >= 85) { confidence += 18; reasons.push("Alpha score very high"); }
   else if (score >= 78) { confidence += 10; reasons.push("Alpha score high"); }
@@ -57,22 +64,40 @@ export function computeDecision(overlay) {
 
   confidence = clamp(confidence, 1, 99);
 
-  const ape =
+  const enter =
     score >= 78 &&
-    rug <= 60 &&
+    rugRisk <= 55 &&
     rising &&
     entry.zone !== "CHASE" &&
     !trap.trap &&
     (breakout || (liq >= 50000 && vol >= 120000)) &&
     (conv.status === "STRONG" || conv.status === "MED");
 
+  // --- STATE MACHINE ---
+  let action = "WAIT";
+
+  if (rugRisk >= 85) action = "RUG_WARNING";
+  else if (enter) action = "ENTER";
+  else if (score >= 68 && rugRisk <= 65 && entry.zone !== "CHASE" && !trap.trap) action = "READY";
+  else if (score >= 58 && rugRisk <= 75) action = "ARM";
+
+  // Confidence must reflect STABILITY, not just alpha.
+  const maxByState =
+    action === "ENTER" ? 85 :
+    action === "READY" ? 75 :
+    action === "ARM" ? 65 : 50;
+
+  confidence = Math.min(confidence, maxByState);
+
   return {
-    action: ape ? "APE" : "WAIT",
+    action,
     confidence,
+    score,
+    rug: rugRisk,
     reasons: reasons.slice(0, 7),
     tags: [
       `SCORE:${score}`,
-      `RUG:${rug}`,
+      `RUG:${rugRisk}`,
       rising ? "ACCEL:ON" : "ACCEL:OFF",
       breakout ? "BREAKOUT:ON" : "BREAKOUT:OFF",
       `CONV:${conv.status}`,
