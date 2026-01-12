@@ -1,0 +1,22 @@
+// src/app.js
+const express = require("express");
+const assist = require("./routes/assist");
+const wallet = require("./routes/wallet");
+const contract = require("./routes/contract");
+const feedback = require("./routes/feedback");
+
+const app = express();
+
+// Basic hardening
+app.disable("x-powered-by");
+
+// Health
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Routes
+app.use(assist);
+app.use(wallet);
+app.use(contract);
+app.use(feedback);
+
+module.exports = app;
