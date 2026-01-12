@@ -1,17 +1,15 @@
 {
   "name": "moon-signal-backend",
-  "version": "5.0.0",
-  "type": "module",
-  "main": "index.js",
+  "version": "1.0.0",
+  "description": "Moon Signal backend (ML assist, contract analysis, wallet convergence)",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node src/index.js"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "ws": "^8.18.0"
+    "express": "^4.19.2"
   }
 }
