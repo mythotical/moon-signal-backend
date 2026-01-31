@@ -6,49 +6,56 @@ const path = require("path");
 const app = express();
 
 app.disable("x-powered-by");
-app.use(express.json({ limit: "200kb" }));
 
-/**
- * ------------------------------------------------------------
- * CORS FIX (THIS IS THE ONLY FUNCTIONAL CHANGE)
- * Allows your extension to call backend from:
- *  - https://axiom.trade
- *  - https://dexscreener.com
- *  - (optional) any additional origins via MS_CORS_ORIGINS env var
- * Handles OPTIONS preflight (required for Axiom).
- * ------------------------------------------------------------
- */
-const DEFAULT_ORIGINS = [
-  "https://axiom.trade",
-  "https://dexscreener.com",
-];
+// -------------------------------
+// CORS + PREFLIGHT FIX (AXIOM)
+// -------------------------------
+// IMPORTANT:
+// - Axiom runs at https://axiom.trade (cross-origin to your Render backend)
+// - Browser sends OPTIONS preflight first
+// - If OPTIONS is blocked or missing headers, the browser blocks all calls
+//
+// This middleware:
+// 1) Whitelists allowed origins (axiom.trade, dexscreener.com, chrome-extension://...)
+// 2) Adds Access-Control-* headers
+// 3) Short-circuits OPTIONS with 204 BEFORE any auth/license middleware
+//
+const isAllowedOrigin = (origin) => {
+  if (!origin) return false;
 
-const ALLOW_ORIGINS = (process.env.MS_CORS_ORIGINS || DEFAULT_ORIGINS.join(","))
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
+  // Chrome extension pages
+  if (origin.startsWith("chrome-extension://")) return true;
 
-// Basic CORS + Preflight
+  // Axiom + subdomains if any
+  if (origin === "https://axiom.trade") return true;
+  if (/^https:\/\/([a-z0-9-]+\.)*axiom\.trade$/i.test(origin)) return true;
+
+  // Dexscreener
+  if (origin === "https://dexscreener.com") return true;
+  if (/^https:\/\/([a-z0-9-]+\.)*dexscreener\.com$/i.test(origin)) return true;
+
+  return false;
+};
+
 app.use((req, res, next) => {
   const origin = (req.headers.origin || "").toString();
 
-  // If origin is in allowlist, reflect it back (best practice vs "*")
-  if (origin && (ALLOW_ORIGINS.includes(origin) || ALLOW_ORIGINS.includes("*"))) {
+  // If the request has an Origin and it's allowed, echo it back.
+  // (Echoing is safest; using "*" can be fine too, but echo keeps future credential options open.)
+  if (origin && isAllowedOrigin(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
 
+  // Always allow these methods/headers for preflight + actual calls
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-MS-License, X-MS-Key, X-Requested-With"
+    "Content-Type, Authorization, X-MS-License, X-MS-Key"
   );
+  res.setHeader("Access-Control-Max-Age", "86400");
 
-  // If you ever send cookies (you currently don't need them), keep this.
-  // Otherwise it's harmless.
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-
-  // Preflight must return 204/200 quickly
+  // CRITICAL: end OPTIONS here so it never hits requireLicense and never returns 401
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -56,12 +63,14 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use(express.json({ limit: "200kb" }));
+
 // --- License/Auth Gate ---
 // Set env var: MS_LICENSE_KEYS="KEY1,KEY2,KEY3"
 // If not set, server runs in open mode.
 const LICENSE_KEYS = (process.env.MS_LICENSE_KEYS || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 const OPEN_MODE = LICENSE_KEYS.length === 0;
 
@@ -97,7 +106,9 @@ const WALLET_BUYS_FILE = path.join(DATA_DIR, "wallet_buys.json");
 const CONV_FILE = path.join(DATA_DIR, "convergence_hits.json");
 
 function ensureDataDir() {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {}
 }
 
 function readJson(file, fallback) {
@@ -117,10 +128,6 @@ function writeJson(file, obj) {
 ensureDataDir();
 
 // In-memory state with disk persistence (best-effort).
-// Shape:
-// usersByHash[hash] = { tier, wallets: [{address,label,enabled}], createdAt }
-// walletBuysByUser[hash] = [{wallet,address,mint,ts,signature}]
-// convergenceByUser[hash] = [{mint,symbol,walletCount,firstTs,lastTs,windowMins,wallets:[{address,label}]}]
 const usersByHash = readJson(USERS_FILE, {});
 const walletBuysByUser = readJson(WALLET_BUYS_FILE, {});
 const convergenceByUser = readJson(CONV_FILE, {});
@@ -141,7 +148,7 @@ function upsertUserForKey(key) {
   return { hash: h, user: usersByHash[h] };
 }
 
-function requireLicense(req, res, next){
+function requireLicense(req, res, next) {
   if (OPEN_MODE) return next();
   const key = getLicenseFromReq(req);
   if (!key || !LICENSE_KEYS.includes(key)) {
@@ -150,21 +157,25 @@ function requireLicense(req, res, next){
   return next();
 }
 
-function maxWalletsForTier(tier){
+function maxWalletsForTier(tier) {
   const t = String(tier || "PRO").toUpperCase();
   if (t === "CORE") return 0;
   if (t === "PRO") return 10;
   return 50; // ELITE default
 }
 
-function normAddr(s){
+function normAddr(s) {
   return String(s || "").trim();
 }
 
-function isSolanaAddr(s){
+function isSolanaAddr(s) {
   // base58-ish, 32-48 chars; loose validation
   const t = normAddr(s);
-  return t.length >= 32 && t.length <= 48 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(t);
+  return (
+    t.length >= 32 &&
+    t.length <= 48 &&
+    /^[1-9A-HJ-NP-Za-km-z]+$/.test(t)
+  );
 }
 
 // Health is always open
@@ -188,77 +199,120 @@ app.get("/assist/:chain/:pair", requireLicense, (req, res) => {
   const tx5 = buys5 + sells5;
   const buyRatio = tx5 > 0 ? buys5 / tx5 : 0.5;
 
-  const clamp01 = (x)=>Math.max(0,Math.min(1,x));
-  const round3 = (x)=>Math.round(x*1000)/1000;
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
+  const round3 = (x) => Math.round(x * 1000) / 1000;
 
-  const p_pump_30m = clamp01(0.15 + alpha/160 + Math.max(0,chg5)/80 + Math.max(0,chg1)/160 + (buyRatio-0.5)*0.8);
-  const p_rug_15m  = clamp01(0.10 + rug/140  + Math.max(0,-chg5)/60 + Math.max(0,-chg1)/120 + (0.5-buyRatio)*0.9);
-  const regime = (p_rug_15m>=0.62) ? "high-risk" : (p_pump_30m>=0.62) ? "momentum" : (chg5<0) ? "pullback" : "neutral";
-  const assistantConfidence = clamp01(0.55 + Math.abs(p_pump_30m - p_rug_15m)*0.65);
+  const p_pump_30m = clamp01(
+    0.15 +
+      alpha / 160 +
+      Math.max(0, chg5) / 80 +
+      Math.max(0, chg1) / 160 +
+      (buyRatio - 0.5) * 0.8
+  );
+  const p_rug_15m = clamp01(
+    0.10 +
+      rug / 140 +
+      Math.max(0, -chg5) / 60 +
+      Math.max(0, -chg1) / 120 +
+      (0.5 - buyRatio) * 0.9
+  );
+  const regime =
+    p_rug_15m >= 0.62
+      ? "high-risk"
+      : p_pump_30m >= 0.62
+      ? "momentum"
+      : chg5 < 0
+      ? "pullback"
+      : "neutral";
+  const assistantConfidence = clamp01(
+    0.55 + Math.abs(p_pump_30m - p_rug_15m) * 0.65
+  );
 
   res.json({
     p_pump_30m: round3(p_pump_30m),
     p_rug_15m: round3(p_rug_15m),
     regime,
     assistantConfidence: round3(assistantConfidence),
-    note: "Assistant-only (never a trade decision)"
+    note: "Assistant-only (never a trade decision)",
   });
 });
 
 // --- Honeypot / sell simulation (scaffold) ---
 app.post("/honeypot/evaluate", requireLicense, async (req, res) => {
   const { chain, token, pair } = req.body || {};
-  if (!chain || !token) return res.status(400).json({ error: "missing_chain_or_token" });
+  if (!chain || !token)
+    return res.status(400).json({ error: "missing_chain_or_token" });
 
   const isEvm = /^0x[a-fA-F0-9]{40}$/.test(token);
-  const out = { chain, token, pair: pair || "", ok: true, source: null, canSell: "unknown", buyTaxBps: null, sellTaxBps: null, warnings: [] };
+  const out = {
+    chain,
+    token,
+    pair: pair || "",
+    ok: true,
+    source: null,
+    canSell: "unknown",
+    buyTaxBps: null,
+    sellTaxBps: null,
+    warnings: [],
+  };
 
-  try{
-    if (isEvm){
+  try {
+    if (isEvm) {
       const chainIdMap = {
-        ethereum: 1, eth: 1,
-        bsc: 56, binance: 56,
-        polygon: 137, matic: 137,
-        arbitrum: 42161, arb: 42161,
-        optimism: 10, op: 10,
+        ethereum: 1,
+        eth: 1,
+        bsc: 56,
+        binance: 56,
+        polygon: 137,
+        matic: 137,
+        arbitrum: 42161,
+        arb: 42161,
+        optimism: 10,
+        op: 10,
         base: 8453,
-        avalanche: 43114, avax: 43114
+        avalanche: 43114,
+        avax: 43114,
       };
       const cid = chainIdMap[String(chain).toLowerCase()] || 1;
       const url = `https://api.honeypot.is/v2/IsHoneypot?address=${token}&chainID=${cid}`;
-      const hp = await fetch(url, { headers: { "accept": "application/json" } }).then(r => r.json());
+      const hp = await fetch(url, {
+        headers: { accept: "application/json" },
+      }).then((r) => r.json());
       out.source = "honeypot.is";
-      const isHoneypot = !!(hp?.honeypotResult?.isHoneypot);
+      const isHoneypot = !!hp?.honeypotResult?.isHoneypot;
       const buyTax = hp?.simulationResult?.buyTax ?? hp?.simulationResult?.taxes?.buyTax;
       const sellTax = hp?.simulationResult?.sellTax ?? hp?.simulationResult?.taxes?.sellTax;
-      out.buyTaxBps = (buyTax == null) ? null : Math.round(Number(buyTax) * 100);
-      out.sellTaxBps = (sellTax == null) ? null : Math.round(Number(sellTax) * 100);
+      out.buyTaxBps = buyTax == null ? null : Math.round(Number(buyTax) * 100);
+      out.sellTaxBps = sellTax == null ? null : Math.round(Number(sellTax) * 100);
       out.canSell = isHoneypot ? "no" : "yes";
       if (isHoneypot) out.warnings.push("honeypot_flagged");
-      if (out.sellTaxBps != null && out.sellTaxBps > 2500) out.warnings.push("high_sell_tax");
-      if (out.buyTaxBps != null && out.buyTaxBps > 2500) out.warnings.push("high_buy_tax");
+      if (out.sellTaxBps != null && out.sellTaxBps > 2500)
+        out.warnings.push("high_sell_tax");
+      if (out.buyTaxBps != null && out.buyTaxBps > 2500)
+        out.warnings.push("high_buy_tax");
     } else {
       const url = `https://api.rugcheck.xyz/v1/tokens/${token}/report`;
       const hdr = {};
       if (process.env.RUGCHECK_API_KEY) hdr["X-API-KEY"] = process.env.RUGCHECK_API_KEY;
-      const rc = await fetch(url, { headers: hdr }).then(r => r.json());
+      const rc = await fetch(url, { headers: hdr }).then((r) => r.json());
       out.source = "rugcheck.xyz";
       const risk = rc?.score ?? rc?.riskScore ?? rc?.summary?.score ?? null;
       const warnings = [];
       const issues = rc?.risks || rc?.warnings || rc?.issues || [];
-      if (Array.isArray(issues)){
-        for (const it of issues){
+      if (Array.isArray(issues)) {
+        for (const it of issues) {
           const t = (it?.name || it?.type || it?.title || it)?.toString?.() || "";
           if (t) warnings.push(t);
           if (warnings.length >= 6) break;
         }
       }
       out.warnings = warnings.length ? warnings : out.warnings;
-      if (typeof risk === "number" && risk >= 700) out.warnings.push("high_rugcheck_score");
+      if (typeof risk === "number" && risk >= 700)
+        out.warnings.push("high_rugcheck_score");
     }
 
     return res.json(out);
-  }catch(e){
+  } catch (e) {
     out.ok = false;
     out.warnings.push("honeypot_check_failed");
     return res.json(out);
@@ -270,9 +324,18 @@ app.get("/contract/:chain/:token", requireLicense, (req, res) => {
   const { chain, token } = req.params;
   const flags = [];
   if (!/^0x[a-fA-F0-9]{40}$/.test(token)) {
-    flags.push({ key: "address_format", severity: "medium", note: "Not an EVM-style address" });
+    flags.push({
+      key: "address_format",
+      severity: "medium",
+      note: "Not an EVM-style address",
+    });
   }
-  res.json({ chain, token, flags, summary: { risk: "unknown", note: "Static scaffold. Add RPC checks next." } });
+  res.json({
+    chain,
+    token,
+    flags,
+    summary: { risk: "unknown", note: "Static scaffold. Add RPC checks next." },
+  });
 });
 
 // --- Wallet convergence feed (per-license; persisted) ---
@@ -280,8 +343,10 @@ app.post("/wallet/hit", requireLicense, (req, res) => {
   const key = getLicenseFromReq(req);
   const { hash } = upsertUserForKey(key);
 
-  const { token, chain, pair, score, detail, wallet, wallets, windowMins } = req.body || {};
-  if (!token || !chain) return res.status(400).json({ error: "missing token or chain" });
+  const { token, chain, pair, score, detail, wallet, wallets, windowMins } =
+    req.body || {};
+  if (!token || !chain)
+    return res.status(400).json({ error: "missing token or chain" });
 
   const hit = {
     time: Date.now(),
@@ -292,7 +357,7 @@ app.post("/wallet/hit", requireLicense, (req, res) => {
     detail: detail ? String(detail) : "",
     wallet: wallet ? String(wallet) : "",
     wallets: Array.isArray(wallets) ? wallets.slice(0, 25) : [],
-    windowMins: Number(windowMins || 10)
+    windowMins: Number(windowMins || 10),
   };
 
   convergenceByUser[hash].unshift(hit);
@@ -344,11 +409,17 @@ app.put("/user/wallets", requireLicense, (req, res) => {
 app.post("/helius/webhook", async (req, res) => {
   const secret = (process.env.HELIUS_WEBHOOK_SECRET || "").trim();
   if (secret) {
-    const got = (req.headers["x-ms-webhook-secret"] || req.headers["x-helius-secret"] || "").toString().trim();
+    const got = (req.headers["x-ms-webhook-secret"] || req.headers["x-helius-secret"] || "")
+      .toString()
+      .trim();
     if (got !== secret) return res.status(401).json({ error: "bad_secret" });
   }
 
-  const events = Array.isArray(req.body) ? req.body : (Array.isArray(req.body?.events) ? req.body.events : []);
+  const events = Array.isArray(req.body)
+    ? req.body
+    : Array.isArray(req.body?.events)
+    ? req.body.events
+    : [];
   if (!events.length) return res.json({ ok: true, ingested: 0 });
 
   const windowMins = Number(process.env.MS_CONV_WINDOW_MINS || 10);
@@ -358,7 +429,7 @@ app.post("/helius/webhook", async (req, res) => {
 
   const walletToUsers = new Map();
   for (const [userHash, u] of Object.entries(usersByHash)) {
-    for (const w of (u.wallets || [])) {
+    for (const w of u.wallets || []) {
       if (!w?.enabled) continue;
       const addr = normAddr(w.address);
       if (!addr) continue;
@@ -390,7 +461,7 @@ app.post("/helius/webhook", async (req, res) => {
         const buys = walletBuysByUser[userHash] || [];
         const key = `${to}|${mint}`;
         if (seenPairs.has(`${userHash}|${key}`)) continue;
-        if (buys.some(b => b.wallet === to && b.mint === mint)) continue;
+        if (buys.some((b) => b.wallet === to && b.mint === mint)) continue;
 
         buys.unshift({ wallet: to, mint, ts: now, signature: signature || "" });
         if (buys.length > 5000) buys.pop();
@@ -399,15 +470,19 @@ app.post("/helius/webhook", async (req, res) => {
         seenPairs.add(`${userHash}|${key}`);
 
         const cutoff = now - windowMins * 60 * 1000;
-        const recent = buys.filter(b => b.mint === mint && b.ts >= cutoff);
+        const recent = buys.filter((b) => b.mint === mint && b.ts >= cutoff);
         const uniq = new Map();
         for (const b of recent) uniq.set(b.wallet, true);
         const uniqCount = uniq.size;
 
         if (uniqCount >= minWallets) {
-          const prev = (convergenceByUser[userHash] || []).find(h => h.token === mint && (now - h.time) <= windowMins * 60 * 1000);
+          const prev = (convergenceByUser[userHash] || []).find(
+            (h) => h.token === mint && now - h.time <= windowMins * 60 * 1000
+          );
           if (!prev) {
-            const wallets = (usersByHash[userHash]?.wallets || []).filter(w => uniq.has(w.address)).map(w => ({ address: w.address, label: w.label || "" }));
+            const wallets = (usersByHash[userHash]?.wallets || [])
+              .filter((w) => uniq.has(w.address))
+              .map((w) => ({ address: w.address, label: w.label || "" }));
             const hit = {
               time: now,
               token: mint,
@@ -416,7 +491,7 @@ app.post("/helius/webhook", async (req, res) => {
               score: "HC",
               detail: `${uniqCount} tracked wallets bought within ${windowMins}m`,
               wallets,
-              windowMins
+              windowMins,
             };
             (convergenceByUser[userHash] ||= []).unshift(hit);
             if (convergenceByUser[userHash].length > 1000) convergenceByUser[userHash].pop();
@@ -434,12 +509,18 @@ app.post("/helius/webhook", async (req, res) => {
 const feedback = [];
 app.post("/feedback", requireLicense, (req, res) => {
   const { chain, pair, outcome, notes } = req.body || {};
-  if (!chain || !pair || !outcome) return res.status(400).json({ error: "missing_fields" });
-  feedback.unshift({ time: Date.now(), chain: String(chain), pair: String(pair), outcome: String(outcome), notes: notes ? String(notes) : "" });
+  if (!chain || !pair || !outcome)
+    return res.status(400).json({ error: "missing_fields" });
+  feedback.unshift({
+    time: Date.now(),
+    chain: String(chain),
+    pair: String(pair),
+    outcome: String(outcome),
+    notes: notes ? String(notes) : "",
+  });
   if (feedback.length > 5000) feedback.pop();
   res.json({ ok: true });
 });
-
 app.get("/feedback/recent", requireLicense, (req, res) => {
   const limit = Math.min(200, Number(req.query.limit || 50));
   res.json({ feedback: feedback.slice(0, limit) });
