@@ -8,55 +8,38 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "200kb" }));
 
-/**
- * -------------------------
- * CORS FIX (AXIOM + DEX)
- * -------------------------
- * Why: content scripts run with the page origin (https://axiom.trade),
- * so browser blocks calls to your backend unless you return proper CORS headers.
- *
- * This block is intentionally minimal and should not affect any business logic.
- */
-const ALLOW_ORIGINS = new Set([
+// --- CORS (needed for Axiom + Dexscreener + Chrome extension) ---
+// NOTE: This does NOT change any endpoint logic. It only allows browser requests from allowed origins.
+const ALLOWED_ORIGINS = new Set([
   "https://axiom.trade",
   "https://www.axiom.trade",
   "https://dexscreener.com",
-  "https://www.dexscreener.com",
+  "https://www.dexscreener.com"
 ]);
 
 app.use((req, res, next) => {
   const origin = (req.headers.origin || "").toString();
 
-  const isAllowed =
-    (origin && ALLOW_ORIGINS.has(origin)) ||
-    (origin && origin.startsWith("chrome-extension://")); // helpful for some setups
+  // Allow Chrome extensions (MV3)
+  const isChromeExt = origin.startsWith("chrome-extension://");
 
-  if (isAllowed) {
+  if (ALLOWED_ORIGINS.has(origin) || isChromeExt) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      [
-        "Content-Type",
-        "Authorization",
-        "X-MS-License",
-        "X-MS-Key",
-        "X-Requested-With",
-      ].join(", ")
-    );
-    res.setHeader(
-      "Access-Control-Allow-Methods",
-      "GET,POST,PUT,OPTIONS"
-    );
   }
 
-  // Handle preflight
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-MS-License, X-MS-Key"
+  );
+
+  // Handle preflight cleanly
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
 
-  return next();
+  next();
 });
 
 // --- License/Auth Gate ---
@@ -314,7 +297,7 @@ app.get("/wallet/hits", requireLicense, (req, res) => {
 // --- User wallets (self-serve) ---
 app.get("/user/wallets", requireLicense, (req, res) => {
   const key = getLicenseFromReq(req);
-  const { user } = upsertUserForKey(key);
+  const { hash, user } = upsertUserForKey(key);
   const tier = String(user.tier || "PRO").toUpperCase();
   res.json({ tier, maxWallets: maxWalletsForTier(tier), wallets: user.wallets || [] });
 });
@@ -375,6 +358,7 @@ app.post("/helius/webhook", async (req, res) => {
 
   for (const ev of events) {
     const signature = ev?.signature || ev?.transactionSignature || "";
+
     const transfers = Array.isArray(ev?.tokenTransfers) ? ev.tokenTransfers : [];
     for (const t of transfers) {
       const to = normAddr(t?.toUserAccount || t?.toAccount || t?.to || "");
