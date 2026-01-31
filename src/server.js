@@ -8,22 +8,32 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "200kb" }));
 
-// --- CORS (needed for Axiom + Dexscreener + Chrome extension) ---
-// NOTE: This does NOT change any endpoint logic. It only allows browser requests from allowed origins.
-const ALLOWED_ORIGINS = new Set([
+/**
+ * ------------------------------------------------------------
+ * CORS FIX (THIS IS THE ONLY FUNCTIONAL CHANGE)
+ * Allows your extension to call backend from:
+ *  - https://axiom.trade
+ *  - https://dexscreener.com
+ *  - (optional) any additional origins via MS_CORS_ORIGINS env var
+ * Handles OPTIONS preflight (required for Axiom).
+ * ------------------------------------------------------------
+ */
+const DEFAULT_ORIGINS = [
   "https://axiom.trade",
-  "https://www.axiom.trade",
   "https://dexscreener.com",
-  "https://www.dexscreener.com"
-]);
+];
 
+const ALLOW_ORIGINS = (process.env.MS_CORS_ORIGINS || DEFAULT_ORIGINS.join(","))
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+// Basic CORS + Preflight
 app.use((req, res, next) => {
   const origin = (req.headers.origin || "").toString();
 
-  // Allow Chrome extensions (MV3)
-  const isChromeExt = origin.startsWith("chrome-extension://");
-
-  if (ALLOWED_ORIGINS.has(origin) || isChromeExt) {
+  // If origin is in allowlist, reflect it back (best practice vs "*")
+  if (origin && (ALLOW_ORIGINS.includes(origin) || ALLOW_ORIGINS.includes("*"))) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
@@ -31,10 +41,14 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-MS-License, X-MS-Key"
+    "Content-Type, Authorization, X-MS-License, X-MS-Key, X-Requested-With"
   );
 
-  // Handle preflight cleanly
+  // If you ever send cookies (you currently don't need them), keep this.
+  // Otherwise it's harmless.
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+
+  // Preflight must return 204/200 quickly
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -358,7 +372,6 @@ app.post("/helius/webhook", async (req, res) => {
 
   for (const ev of events) {
     const signature = ev?.signature || ev?.transactionSignature || "";
-
     const transfers = Array.isArray(ev?.tokenTransfers) ? ev.tokenTransfers : [];
     for (const t of transfers) {
       const to = normAddr(t?.toUserAccount || t?.toAccount || t?.to || "");
@@ -426,6 +439,7 @@ app.post("/feedback", requireLicense, (req, res) => {
   if (feedback.length > 5000) feedback.pop();
   res.json({ ok: true });
 });
+
 app.get("/feedback/recent", requireLicense, (req, res) => {
   const limit = Math.min(200, Number(req.query.limit || 50));
   res.json({ feedback: feedback.slice(0, limit) });
