@@ -8,6 +8,48 @@ const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "200kb" }));
 
+/* =========================================================
+   ✅ AXIOM FIX: CORS + OPTIONS PREFLIGHT (ONLY ADDITION)
+   - Allows extension calls when user is on https://axiom.trade
+   - Does NOT change any logic/routes/auth
+   - Must be BEFORE your requireLicense middleware touches routes
+========================================================= */
+const ALLOWED_ORIGINS = new Set([
+  "https://axiom.trade",
+  "https://dexscreener.com",
+  "https://www.dexscreener.com",
+]);
+
+app.use((req, res, next) => {
+  const origin = (req.headers.origin || "").toString().trim();
+
+  // Only reflect approved origins (safe)
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin"); // IMPORTANT: cache correctness
+
+    // Methods your extension uses
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
+
+    // Reflect requested headers (includes x-ms-license preflight)
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      (req.headers["access-control-request-headers"] || "content-type,authorization,x-ms-license,x-ms-key").toString()
+    );
+
+    // Cache preflight for 24h
+    res.setHeader("Access-Control-Max-Age", "86400");
+  }
+
+  // Always end OPTIONS preflight early so it never hits license gate
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
+  next();
+});
+/* ======================= END AXIOM CORS FIX ======================= */
+
 // --- License/Auth Gate ---
 // Set env var: MS_LICENSE_KEYS="KEY1,KEY2,KEY3"
 // If not set, server runs in open mode.
@@ -297,11 +339,6 @@ app.put("/user/wallets", requireLicense, (req, res) => {
 });
 
 // --- Helius webhook ingest (Solana) ---
-// This endpoint is meant to be configured as a Helius webhook target.
-// It will:
-// 1) Match incoming events to users by tracked wallet addresses
-// 2) Record BUY-only, new-token-only per wallet
-// 3) Emit a convergence hit when >= N unique wallets buy the same mint within a window
 app.post("/helius/webhook", async (req, res) => {
   // Helius webhooks are unsigned by default. Optional shared secret.
   const secret = (process.env.HELIUS_WEBHOOK_SECRET || "").trim();
