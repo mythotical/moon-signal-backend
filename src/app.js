@@ -1,3 +1,4 @@
+// src/app.js
 const express = require("express");
 
 const assist = require("./routes/assist");
@@ -9,28 +10,23 @@ const shopify = require("./routes/shopify");
 const app = express();
 app.disable("x-powered-by");
 
-// ✅ Global request logger (YOU WILL SEE EVERY HIT IN RENDER LOGS)
+// ✅ MUST have this to read JSON bodies
+app.use(express.json());
+
+// ✅ simple request logger so you SEE hits in Render logs
 app.use((req, res, next) => {
-  console.log("➡️ INCOMING", req.method, req.url);
+  console.log(`➡️ ${req.method} ${req.path}`);
   next();
 });
 
-// ✅ Health check
 app.get("/health", (req, res) => res.json({ ok: true }));
-
-// IMPORTANT:
-// Do NOT use app.use(express.json()) globally if you want raw body for Shopify,
-// unless you do it conditionally.
-// For now, if your other routes require JSON, we’ll add it only for them:
-
-app.use(express.json({ limit: "1mb" })); // for your existing API routes (assist/wallet/etc)
 
 app.use(assist);
 app.use(wallet);
 app.use(contract);
 app.use(feedback);
 
-// Shopify routes include express.raw internally for the webhook POST.
-app.use(shopify);
+// ✅ Mount Shopify routes under the correct prefix
+app.use("/webhooks/shopify", shopify);
 
 module.exports = app;
