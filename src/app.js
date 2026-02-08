@@ -1,33 +1,26 @@
 const express = require("express");
 
-// Existing routes
+const shopifyWebhook = require("./routes/shopifyWebhook");
+
 const assist = require("./routes/assist");
 const wallet = require("./routes/wallet");
 const contract = require("./routes/contract");
 const feedback = require("./routes/feedback");
 
-// NEW: Shopify webhook route
-const shopify = require("./routes/shopify");
-
 const app = express();
 app.disable("x-powered-by");
 
-// IMPORTANT:
-// Do NOT use express.json() globally
-// Shopify webhooks require RAW body (handled inside the route)
+app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+// ✅ Shopify webhook MUST be mounted BEFORE express.json()
+app.use(shopifyWebhook);
 
-// Existing routes
+// If your other routes need JSON bodies:
+app.use(express.json());
+
 app.use(assist);
 app.use(wallet);
 app.use(contract);
 app.use(feedback);
-
-// NEW: Shopify webhooks
-app.use(shopify);
 
 module.exports = app;
