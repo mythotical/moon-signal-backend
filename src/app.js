@@ -12,10 +12,10 @@ app.disable("x-powered-by");
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ Shopify webhook MUST be mounted BEFORE express.json()
+// ✅ MUST COME BEFORE express.json()
 app.use(shopifyWebhook);
 
-// If your other routes need JSON bodies:
+// For your other routes that expect JSON:
 app.use(express.json());
 
 app.use(assist);
