@@ -1,77 +1,39 @@
 const express = require("express");
 const crypto = require("crypto");
-const fetch = require("node-fetch");
 
 const router = express.Router();
 
 router.post(
   "/webhooks/shopify/order-paid",
   express.raw({ type: "application/json" }),
-  async (req, res) => {
-    try {
-      // 🔐 Verify Shopify signature
-      const hmac = req.headers["x-shopify-hmac-sha256"];
-      const body = req.body.toString("utf8");
+  (req, res) => {
+    console.log("🟢 Shopify webhook received");
 
-      const digest = crypto
-        .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
-        .update(body)
-        .digest("base64");
+    const hmac = req.headers["x-shopify-hmac-sha256"];
+    const body = req.body;
 
-      if (digest !== hmac) {
-        return res.status(401).send("Invalid webhook signature");
-      }
+    const digest = crypto
+      .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
+      .update(body, "utf8")
+      .digest("base64");
 
-      const order = JSON.parse(body);
-
-      // 🧠 Decide tier (based on product title / SKU)
-      const lineItem = order.line_items[0];
-      let policyId;
-
-      if (lineItem.title.includes("Basic")) {
-        policyId = process.env.KEYGEN_POLICY_BASIC;
-      } else if (lineItem.title.includes("Pro+")) {
-        policyId = process.env.KEYGEN_POLICY_PROPLUS;
-      } else if (lineItem.title.includes("Pro")) {
-        policyId = process.env.KEYGEN_POLICY_PRO;
-      } else {
-        return res.status(400).send("Unknown product tier");
-      }
-
-      // 🔑 Create license in Keygen
-      const response = await fetch(
-        `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${process.env.KEYGEN_TOKEN}`,
-            "Content-Type": "application/vnd.api+json",
-            "Accept": "application/vnd.api+json",
-          },
-          body: JSON.stringify({
-            data: {
-              type: "licenses",
-              relationships: {
-                policy: {
-                  data: { type: "policies", id: policyId },
-                },
-              },
-            },
-          }),
-        }
-      );
-
-      const json = await response.json();
-      const licenseKey = json.data.attributes.key;
-
-      // TODO: email customer (or store it)
-      console.log("LICENSE KEY:", licenseKey);
-
-      res.status(200).send("OK");
-    } catch (err) {
-      console.error(err);
-      res.status(500).send("Server error");
+    if (digest !== hmac) {
+      console.error("❌ Invalid Shopify signature");
+      return res.status(401).send("Invalid signature");
     }
+
+    const order = JSON.parse(body.toString("utf8"));
+
+    console.log("✅ Order paid:", {
+      email: order.email,
+      items: order.line_items.map(i => ({
+        title: i.title,
+        sku: i.sku
+      }))
+    });
+
+    // We’ll issue Keygen licenses here next
+    res.status(200).send("OK");
   }
 );
 
