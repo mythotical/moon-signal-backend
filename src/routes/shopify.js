@@ -1,11 +1,14 @@
+// src/routes/shopify.js
 const express = require("express");
 const crypto = require("crypto");
 
 const router = express.Router();
 
 /**
- * Shopify sends HMAC in header: X-Shopify-Hmac-Sha256
- * HMAC is computed over RAW request body bytes.
+ * HMAC verification
+ * NOTE: app.js MUST mount express.raw({ type: "application/json" })
+ * on /webhooks/shopify BEFORE this router.
+ * That means: req.body is a Buffer here.
  */
 function verifyShopifyHmac(req) {
   const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
@@ -14,10 +17,11 @@ function verifyShopifyHmac(req) {
   if (!secret) throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
   if (!hmacHeader) throw new Error("Missing X-Shopify-Hmac-Sha256 header");
 
-  // Because we mounted express.raw() in app.js, req.body is a Buffer here
   const rawBody = req.body;
   if (!rawBody || !Buffer.isBuffer(rawBody)) {
-    throw new Error("Expected raw body Buffer but got none (check express.raw middleware order)");
+    throw new Error(
+      "Expected req.body to be a Buffer. Check app.js middleware order: express.raw must run before this route."
+    );
   }
 
   const digest = crypto
@@ -25,7 +29,6 @@ function verifyShopifyHmac(req) {
     .update(rawBody)
     .digest("base64");
 
-  // timing-safe compare
   const a = Buffer.from(digest);
   const b = Buffer.from(hmacHeader);
 
@@ -34,20 +37,18 @@ function verifyShopifyHmac(req) {
   }
 }
 
-function pickTierFromOrder(order) {
-  const title =
-    order?.line_items?.[0]?.title ||
-    order?.line_items?.[0]?.name ||
-    "";
+/**
+ * Tier detection that works even if your Shopify product titles are like:
+ * "Obsidian BASIC", "BASIC Plan", "PRO+", "Pro Plus", etc.
+ */
+function detectTier(order) {
+  const item = order?.line_items?.[0];
+  const title = String(item?.title || item?.name || "").toLowerCase();
 
-  const t = String(title).toLowerCase();
-
-  if (t.includes("pro+")
-   || t.includes("pro plus")
-   || t.includes("proplus")) return "PROPLUS";
-
-  if (t.includes("pro")) return "PRO";
-  if (t.includes("basic")) return "BASIC";
+  if (title.includes("pro+") || title.includes("pro plus") || title.includes("proplus"))
+    return "PROPLUS";
+  if (title.includes("pro")) return "PRO";
+  if (title.includes("basic")) return "BASIC";
 
   return null;
 }
@@ -63,30 +64,46 @@ router.get("/ping", (req, res) => {
   res.json({ ok: true, route: "shopify webhook router alive" });
 });
 
+/**
+ * Shopify webhook endpoint:
+ * POST /webhooks/shopify/order-paid
+ */
 router.post("/order-paid", async (req, res) => {
   try {
-    // 1) Verify signature (requires raw body)
-    verifyShopifyHmac(req);
+    // Log immediately so you KNOW it hit even if HMAC fails
+    console.log("✅ Webhook hit: POST /webhooks/shopify/order-paid");
+    console.log("Topic:", req.get("X-Shopify-Topic"));
+    console.log("Shop:", req.get("X-Shopify-Shop-Domain"));
 
-    // 2) Parse JSON from raw buffer
+    // 1) Verify HMAC
+    verifyShopifyHmac(req);
+    console.log("✅ Shopify HMAC OK");
+
+    // 2) Parse JSON body from raw buffer
     const order = JSON.parse(req.body.toString("utf8"));
 
-    console.log("✅ Shopify webhook received: order-paid");
-    console.log("Order id:", order?.id);
+    console.log("Order ID:", order?.id);
     console.log("Email:", order?.email);
-    console.log("Line item title:", order?.line_items?.[0]?.title);
+    console.log(
+      "Line items:",
+      (order?.line_items || []).map((li) => ({
+        title: li.title,
+        sku: li.sku,
+        quantity: li.quantity,
+        price: li.price,
+      }))
+    );
 
-    // 3) Determine tier
-    const tier = pickTierFromOrder(order);
+    // 3) Detect tier
+    const tier = detectTier(order);
     if (!tier) {
-      console.log("❌ Could not determine tier from order line item title.");
-      return res.status(200).json({ ok: true, note: "Webhook received, but tier not recognized" });
+      console.log("❌ Tier not recognized from line item title.");
+      // Return 200 so Shopify doesn't keep retrying forever
+      return res.status(200).json({ ok: true, note: "Tier not recognized" });
     }
 
     const policyId = policyIdForTier(tier);
-    if (!policyId) {
-      throw new Error(`Missing Keygen policy env var for tier ${tier}`);
-    }
+    if (!policyId) throw new Error(`Missing KEYGEN_POLICY env var for tier ${tier}`);
 
     // 4) Create Keygen license
     const accountId = process.env.KEYGEN_ACCOUNT_ID;
@@ -102,40 +119,49 @@ router.post("/order-paid", async (req, res) => {
         type: "licenses",
         attributes: {
           name: `${tier} - ${order?.email || "unknown"}`,
-          protected: true
+          protected: true,
+          metadata: {
+            tier,
+            shopify_order_id: String(order?.id || ""),
+            shopify_email: String(order?.email || ""),
+          },
         },
         relationships: {
           policy: {
-            data: { type: "policies", id: policyId }
-          }
-        }
-      }
+            data: { type: "policies", id: policyId },
+          },
+        },
+      },
     };
 
-    const resp = await fetch(url, {
+    const keygenResp = await fetch(url, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/vnd.api+json",
-        "Accept": "application/vnd.api+json"
+        Accept: "application/vnd.api+json",
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
     });
 
-    const data = await resp.json();
-    if (!resp.ok) {
-      console.log("❌ Keygen error:", data);
-      throw new Error(`Keygen create license failed (${resp.status})`);
+    const keygenJson = await keygenResp.json();
+
+    if (!keygenResp.ok) {
+      console.log("❌ Keygen error:", keygenJson);
+      throw new Error(`Keygen license create failed (${keygenResp.status})`);
     }
 
-    const licenseKey = data?.data?.attributes?.key;
+    const licenseKey = keygenJson?.data?.attributes?.key;
     console.log("🔑 Keygen license created:", licenseKey);
+    console.log("✅ Tier:", tier);
 
-    // 5) Respond to Shopify quickly
-    return res.status(200).json({ ok: true, tier, licenseKey });
+    // Return 200 so Shopify marks webhook successful
+    return res.status(200).json({ ok: true, tier });
   } catch (err) {
     console.log("❌ Webhook error:", err.message);
-    return res.status(200).json({ ok: false, error: err.message }); // Shopify expects 200s often
+
+    // IMPORTANT: Return 200 so Shopify doesn't hammer retries while debugging
+    return res.status(200).json({ ok: false, error: err.message });
   }
 });
 
