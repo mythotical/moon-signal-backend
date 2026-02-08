@@ -1,14 +1,11 @@
 // src/routes/shopify.js
 const express = require("express");
 const crypto = require("crypto");
-const axios = require("axios");
 
 const router = express.Router();
 
 /**
- * IMPORTANT:
- * Shopify sends raw body for HMAC verification.
- * We must capture raw body bytes.
+ * Capture RAW body for Shopify HMAC verification
  */
 router.use(
   express.json({
@@ -18,10 +15,6 @@ router.use(
   })
 );
 
-/**
- * Verify Shopify webhook HMAC
- * Shopify header: X-Shopify-Hmac-Sha256 (base64)
- */
 function verifyShopifyHmac(req) {
   const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
   if (!secret) throw new Error("Missing SHOPIFY_WEBHOOK_SECRET");
@@ -34,7 +27,6 @@ function verifyShopifyHmac(req) {
     .update(req.rawBody)
     .digest("base64");
 
-  // timing-safe compare
   const a = Buffer.from(digest, "utf8");
   const b = Buffer.from(hmacHeader, "utf8");
   if (a.length !== b.length) return false;
@@ -42,19 +34,10 @@ function verifyShopifyHmac(req) {
   return crypto.timingSafeEqual(a, b);
 }
 
-/**
- * Optional: Ping endpoint so you can test route exists in browser
- * GET /webhooks/shopify/ping
- */
 router.get("/ping", (req, res) => {
   res.json({ ok: true, route: "shopify webhook router alive" });
 });
 
-/**
- * Shopify webhook endpoint
- * Set Shopify webhook URL to:
- * https://YOUR_RENDER_URL/webhooks/shopify/order-paid
- */
 router.post("/order-paid", async (req, res) => {
   try {
     // 1) Verify Shopify signature
@@ -66,8 +49,6 @@ router.post("/order-paid", async (req, res) => {
 
     // 2) Parse order
     const order = req.body;
-
-    // Helpful debug logs
     console.log("✅ Shopify webhook received: order-paid");
     console.log("Order ID:", order?.id);
     console.log("Email:", order?.email);
@@ -83,8 +64,6 @@ router.post("/order-paid", async (req, res) => {
 
     // 3) Map product title -> Keygen policy
     let policyId = null;
-
-    // Adjust these if your Shopify product titles differ:
     if (title === "BASIC") policyId = process.env.KEYGEN_POLICY_BASIC;
     else if (title === "PRO") policyId = process.env.KEYGEN_POLICY_PRO;
     else if (title === "PRO+") policyId = process.env.KEYGEN_POLICY_PROPLUS;
@@ -94,13 +73,18 @@ router.post("/order-paid", async (req, res) => {
       return res.status(400).json({ error: "Unknown tier/title" });
     }
 
-    // 4) Create Keygen license
     const token = process.env.KEYGEN_TOKEN;
     if (!token) throw new Error("Missing KEYGEN_TOKEN");
 
-    const resp = await axios.post(
-      "https://api.keygen.sh/v1/licenses",
-      {
+    // 4) Create Keygen license (using Node 20 built-in fetch)
+    const keygenResp = await fetch("https://api.keygen.sh/v1/licenses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/vnd.api+json",
+        Accept: "application/vnd.api+json",
+      },
+      body: JSON.stringify({
         data: {
           type: "licenses",
           relationships: {
@@ -111,7 +95,6 @@ router.post("/order-paid", async (req, res) => {
               },
             },
           },
-          // Optional metadata
           attributes: {
             metadata: {
               shopify_order_id: String(order?.id || ""),
@@ -120,26 +103,22 @@ router.post("/order-paid", async (req, res) => {
             },
           },
         },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/vnd.api+json",
-          Accept: "application/vnd.api+json",
-        },
-        timeout: 15000,
-      }
-    );
+      }),
+    });
 
-    const licenseKey = resp?.data?.data?.attributes?.key;
+    const keygenJson = await keygenResp.json();
+
+    if (!keygenResp.ok) {
+      console.log("❌ Keygen error:", keygenJson);
+      return res.status(500).json({ error: "Keygen create failed" });
+    }
+
+    const licenseKey = keygenJson?.data?.attributes?.key;
     console.log("🔑 Keygen license created:", licenseKey);
 
-    // 5) (Optional later) email customer the key
-    // For now: just return 200 so Shopify marks webhook as successful
     return res.status(200).json({ ok: true });
-
   } catch (err) {
-    console.log("❌ Webhook error:", err?.response?.data || err.message);
+    console.log("❌ Webhook error:", err?.message || err);
     return res.status(500).json({ error: "Webhook failed" });
   }
 });
