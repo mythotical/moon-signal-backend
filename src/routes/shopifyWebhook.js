@@ -1,59 +1,52 @@
 const express = require("express");
 const crypto = require("crypto");
-const { issueLicenseKey } = require("../services/keygen");
 
 const router = express.Router();
 
-// IMPORTANT: RAW BODY for Shopify verification
+// IMPORTANT: use express.raw for Shopify webhooks
 router.post(
   "/webhooks/shopify/order-paid",
   express.raw({ type: "application/json" }),
-  async (req, res) => {
+  (req, res) => {
     try {
-      // 1️⃣ Verify Shopify signature
-      const hmac = req.get("X-Shopify-Hmac-Sha256");
+      const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
+      const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+
+      // 1) Basic logging so we KNOW it hit
+      console.log("✅ Shopify webhook HIT: /order-paid");
+      console.log("Topic:", req.get("X-Shopify-Topic"));
+      console.log("Shop:", req.get("X-Shopify-Shop-Domain"));
+
+      // 2) Verify HMAC (optional to start, but recommended)
+      if (!secret) {
+        console.log("⚠️ Missing SHOPIFY_WEBHOOK_SECRET env var");
+        return res.status(500).send("Missing secret");
+      }
+
       const digest = crypto
-        .createHmac("sha256", process.env.SHOPIFY_WEBHOOK_SECRET)
+        .createHmac("sha256", secret)
         .update(req.body)
         .digest("base64");
 
-      if (hmac !== digest) {
-        return res.status(401).send("Invalid webhook signature");
+      if (digest !== hmacHeader) {
+        console.log("❌ Shopify HMAC invalid");
+        return res.status(401).send("Invalid signature");
       }
 
-      // 2️⃣ Parse order
-      const order = JSON.parse(req.body.toString("utf8"));
-      if (order.financial_status !== "paid") {
-        return res.status(200).send("Not paid");
-      }
+      // 3) Parse JSON body
+      const payload = JSON.parse(req.body.toString("utf8"));
 
-      const email = order.email || order.customer?.email;
-      if (!email) return res.status(200).send("No email");
+      console.log("✅ Shopify HMAC OK");
+      console.log("Order ID:", payload?.id);
+      console.log("Email:", payload?.email);
+      console.log("Line items:", payload?.line_items?.map(i => `${i.title} x${i.quantity}`));
 
-      // 3️⃣ Detect tier via SKU (BEST METHOD)
-      const skus = order.line_items.map(i => (i.sku || "").toUpperCase());
+      // TODO: create Keygen license here based on line_items
 
-      let tier = null;
-      if (skus.includes("OBS-BASIC")) tier = "basic";
-      if (skus.includes("OBS-PRO")) tier = "pro";
-      if (skus.includes("OBS-PROPLUS")) tier = "pro_plus";
-
-      if (!tier) return res.status(200).send("Tier not detected");
-
-      // 4️⃣ Create 1-time license key
-      const { key } = await issueLicenseKey({
-        email,
-        tier,
-        orderId: order.id,
-      });
-
-      // 5️⃣ TEMP: log key (later email it)
-      console.log(`LICENSE ISSUED → ${email} → ${tier}: ${key}`);
-
-      res.status(200).send("OK");
+      return res.status(200).send("ok");
     } catch (err) {
-      console.error("Shopify webhook error:", err);
-      res.status(500).send("Server error");
+      console.error("Webhook error:", err);
+      return res.status(500).send("Webhook error");
     }
   }
 );
