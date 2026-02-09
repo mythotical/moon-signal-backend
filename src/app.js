@@ -10,7 +10,7 @@ const license = require("./routes/license");
 const app = express();
 app.disable("x-powered-by");
 
-// ✅ CORS for Chrome extension + browser
+// CORS (extension)
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
@@ -22,28 +22,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// ✅ Health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-/**
- * ✅ Shopify webhooks need RAW body (for HMAC)
- * MUST be before express.json()
- */
+// ✅ Shopify needs RAW body for HMAC
 app.use("/webhooks/shopify", express.raw({ type: "*/*" }));
 app.use("/webhooks/shopify", shopify);
 
-/**
- * ✅ Normal JSON for everything else
- */
+// ✅ Everything else uses JSON
 app.use(express.json());
 
-// Existing routes
+// Your routes
 app.use(assist);
 app.use(wallet);
 app.use(contract);
 app.use(feedback);
 
-// License routes
+// ✅ License verify route
 app.use(license);
 
 module.exports = app;
