@@ -2,97 +2,143 @@ const express = require("express");
 
 const router = express.Router();
 
-/**
- * Verify license key
- */
-router.post("/license/verify", async (req, res) => {
-  try {
-    const { licenseKey } = req.body;
-    if (!licenseKey) return res.status(400).json({ ok: false });
+// Helpers
+function tierRank(tier) {
+  const t = String(tier || "").toUpperCase();
+  if (t === "PROPLUS" || t === "PRO+") return 3;
+  if (t === "PRO") return 2;
+  if (t === "BASIC") return 1;
+  return 0;
+}
 
-    const resp = await fetch(
-      `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses/actions/validate-key`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
-          "Content-Type": "application/vnd.api+json",
-          Accept: "application/vnd.api+json"
-        },
-        body: JSON.stringify({ meta: { key: licenseKey.trim() } })
-      }
-    );
+function normalizeTier(tier) {
+  const t = String(tier || "").toUpperCase();
+  if (t === "PRO+") return "PROPLUS";
+  return t;
+}
+
+/**
+ * POST /license/verify
+ * Body: { key: "XXXXX-XXXXX-..." }
+ * Returns: { ok: true, tier: "BASIC|PRO|PROPLUS", entitlements: {...} }
+ */
+router.post("/license/verify", express.json(), async (req, res) => {
+  try {
+    const key = String(req.body?.key || "").trim();
+    if (!key) return res.status(400).json({ ok: false, error: "Missing key" });
+
+    const accountId = process.env.KEYGEN_ACCOUNT_ID;
+    const token = process.env.KEYGEN_TOKEN;
+
+    if (!accountId) return res.status(500).json({ ok: false, error: "Missing KEYGEN_ACCOUNT_ID" });
+    if (!token) return res.status(500).json({ ok: false, error: "Missing KEYGEN_TOKEN" });
+
+    // ✅ Validate license key with Keygen
+    const resp = await fetch(`https://api.keygen.sh/v1/accounts/${accountId}/licenses/actions/validate-key`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/vnd.api+json",
+        Accept: "application/vnd.api+json",
+      },
+      body: JSON.stringify({
+        meta: { key },
+      }),
+    });
 
     const json = await resp.json();
-    if (!json?.meta?.valid) return res.status(401).json({ ok: false });
-
-    const tier = json.data.attributes.metadata?.tier || "UNKNOWN";
-    return res.json({ ok: true, tier });
-
-  } catch (err) {
-    console.log("❌ Verify error:", err.message);
-    return res.status(500).json({ ok: false });
-  }
-});
-
-/**
- * Activate license to one machine
- */
-router.post("/license/activate", async (req, res) => {
-  try {
-    const { licenseKey, machineFingerprint } = req.body;
-    if (!licenseKey || !machineFingerprint) {
-      return res.status(400).json({ ok: false });
+    if (!resp.ok) {
+      console.log("❌ Keygen validation failed:", json);
+      return res.status(401).json({ ok: false, error: "Invalid or expired license key" });
     }
 
-    // Validate first
-    const v = await fetch(
-      `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses/actions/validate-key`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
-          "Content-Type": "application/vnd.api+json"
-        },
-        body: JSON.stringify({ meta: { key: licenseKey.trim() } })
-      }
-    );
+    // Keygen validate response includes license in data
+    const lic = json?.data;
+    const meta = lic?.attributes?.metadata || {};
 
-    const vj = await v.json();
-    if (!vj.meta.valid) return res.status(401).json({ ok: false });
+    const tier = normalizeTier(meta.tier || meta.plan || "BASIC");
 
-    const licenseId = vj.data.id;
-    const tier = vj.data.attributes.metadata?.tier || "UNKNOWN";
+    // ✅ Return entitlements for overlay gating
+    // (Your extension uses this to enable/disable UI + features)
+    const entitlementsByTier = {
+      BASIC: {
+        rugWarnings: true,
+        waitWatchSignals: true,
+        liquidityWhaleDetection: true,
+        exitAlerts: true,
+        overlaySites: ["dexscreener", "pumpfun"],
+        updateMs: 800,
+        aiEngine: false,
+        momentum: false,
+        volumeSurge: false,
+        sellPressure: false,
+        enterHoldExit: false,
+        priorityRefresh: false,
+        multiTimeframe: false,
+        smartMoney: false,
+        advancedRisk: false,
+        earlyDump: false,
+        priorityExecution: false,
+        earlyFeatures: false,
+        feedbackInfluence: false,
+      },
+      PRO: {
+        rugWarnings: true,
+        waitWatchSignals: true,
+        liquidityWhaleDetection: true,
+        exitAlerts: true,
+        overlaySites: ["dexscreener", "pumpfun"],
+        updateMs: 500,
+        aiEngine: true,
+        momentum: true,
+        volumeSurge: true,
+        sellPressure: true,
+        enterHoldExit: true,
+        priorityRefresh: true,
+        multiTimeframe: false,
+        smartMoney: false,
+        advancedRisk: false,
+        earlyDump: false,
+        priorityExecution: false,
+        earlyFeatures: false,
+        feedbackInfluence: false,
+      },
+      PROPLUS: {
+        rugWarnings: true,
+        waitWatchSignals: true,
+        liquidityWhaleDetection: true,
+        exitAlerts: true,
+        overlaySites: ["dexscreener", "pumpfun"],
+        updateMs: 300,
+        aiEngine: true,
+        momentum: true,
+        volumeSurge: true,
+        sellPressure: true,
+        enterHoldExit: true,
+        priorityRefresh: true,
+        multiTimeframe: true,
+        smartMoney: true,
+        advancedRisk: true,
+        earlyDump: true,
+        priorityExecution: true,
+        earlyFeatures: true,
+        feedbackInfluence: true,
+      },
+    };
 
-    const m = await fetch(
-      `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/machines`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
-          "Content-Type": "application/vnd.api+json"
-        },
-        body: JSON.stringify({
-          data: {
-            type: "machines",
-            attributes: { fingerprint: machineFingerprint },
-            relationships: {
-              license: {
-                data: { type: "licenses", id: licenseId }
-              }
-            }
-          }
-        })
-      }
-    );
+    const entitlements =
+      tierRank(tier) >= 3 ? entitlementsByTier.PROPLUS :
+      tierRank(tier) >= 2 ? entitlementsByTier.PRO :
+      entitlementsByTier.BASIC;
 
-    if (!m.ok) return res.status(403).json({ ok: false });
-
-    return res.json({ ok: true, tier });
-
-  } catch (err) {
-    console.log("❌ Activate error:", err.message);
-    return res.status(500).json({ ok: false });
+    return res.json({
+      ok: true,
+      tier,
+      entitlements,
+    });
+  } catch (e) {
+    console.log("❌ /license/verify error:", e.message);
+    return res.status(500).json({ ok: false, error: "Server error" });
   }
 });
 
