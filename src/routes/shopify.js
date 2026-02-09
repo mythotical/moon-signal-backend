@@ -1,10 +1,18 @@
 const express = require("express");
 const crypto = require("crypto");
-const axios = require("axios");
 
 const router = express.Router();
 
-// ✅ IMPORTANT: raw body ONLY for Shopify webhook route
+/**
+ * Ping test
+ */
+router.get("/webhooks/shopify/ping", (req, res) => {
+  res.json({ ok: true, route: "shopify webhook alive" });
+});
+
+/**
+ * Shopify webhook (RAW BODY REQUIRED)
+ */
 router.post(
   "/webhooks/shopify/order-paid",
   express.raw({ type: "*/*" }),
@@ -12,123 +20,99 @@ router.post(
     try {
       console.log("✅ Webhook hit: POST /webhooks/shopify/order-paid");
 
-      const shop = req.get("X-Shopify-Shop-Domain") || "unknown";
-      const topic = req.get("X-Shopify-Topic") || "unknown";
-      console.log("Topic:", topic);
-      console.log("Shop:", shop);
-
       const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
-      if (!secret) throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
+      if (!secret) throw new Error("Missing SHOPIFY_WEBHOOK_SECRET");
 
-      const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
-      if (!hmacHeader) throw new Error("Missing X-Shopify-Hmac-Sha256 header");
+      const hmac = req.get("X-Shopify-Hmac-Sha256");
+      if (!hmac) throw new Error("Missing Shopify HMAC");
 
-      const rawBody = req.body; // Buffer
-      const computed = crypto
+      const rawBody = req.body;
+
+      const digest = crypto
         .createHmac("sha256", secret)
         .update(rawBody)
         .digest("base64");
 
-      if (computed !== hmacHeader) {
+      if (digest !== hmac) {
         console.log("❌ HMAC mismatch");
-        return res.status(401).send("HMAC verification failed");
+        return res.status(401).send("HMAC failed");
       }
 
       console.log("✅ Shopify HMAC OK");
 
-      // parse JSON AFTER verifying HMAC
-      const payload = JSON.parse(rawBody.toString("utf8"));
+      const order = JSON.parse(rawBody.toString("utf8"));
+      const email = order.email;
+      const lineItems = order.line_items || [];
 
-      const orderId = payload?.id;
-      const email = payload?.email || payload?.customer?.email || null;
-      const lineItems = payload?.line_items || [];
-
-      console.log("Order ID:", orderId);
+      console.log("Order ID:", order.id);
       console.log("Email:", email);
-      console.log(
-        "Line items:",
-        lineItems.map((x) => ({
-          title: x.title,
-          sku: x.sku ?? null,
-          quantity: x.quantity,
-          price: String(x.price),
-        }))
-      );
+      console.log("Line items:", lineItems.map(i => i.title));
 
-      // ✅ decide tier from line items
-      const titles = lineItems.map((i) => String(i.title || "").toUpperCase());
+      // Detect tier (highest wins)
+      const titles = lineItems.map(i => String(i.title).toUpperCase());
       const tier =
-        titles.includes("PRO+") ? "PROPLUS" : titles.includes("PRO") ? "PRO" : titles.includes("BASIC") ? "BASIC" : null;
+        titles.includes("PRO+") ? "PROPLUS" :
+        titles.includes("PRO") ? "PRO" :
+        titles.includes("BASIC") ? "BASIC" :
+        null;
 
       if (!tier) {
-        console.log("❌ No tier product found in this order");
-        return res.status(200).json({ ok: true, ignored: true });
+        console.log("❌ No tier detected");
+        return res.status(200).json({ ok: true });
       }
 
-      console.log(`✅ Tier: ${tier}`);
+      console.log("✅ Tier:", tier);
 
-      // ✅ choose policy env var
       const policyId =
-        tier === "BASIC"
-          ? process.env.KEYGEN_POLICY_BASIC
-          : tier === "PRO"
-          ? process.env.KEYGEN_POLICY_PRO
-          : process.env.KEYGEN_POLICY_PROPLUS;
+        tier === "BASIC" ? process.env.KEYGEN_POLICY_BASIC :
+        tier === "PRO" ? process.env.KEYGEN_POLICY_PRO :
+        process.env.KEYGEN_POLICY_PROPLUS;
 
-      if (!policyId) throw new Error(`Missing policy env var for tier ${tier}`);
+      if (!policyId) throw new Error(`Missing policy env for ${tier}`);
 
-      const accountId = process.env.KEYGEN_ACCOUNT_ID;
-      if (!accountId) throw new Error("Missing KEYGEN_ACCOUNT_ID env var");
-
-      const token = process.env.KEYGEN_TOKEN;
-      if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
-
-      // ✅ Create license in Keygen
-      const resp = await axios.post(
-        `https://api.keygen.sh/v1/accounts/${accountId}/licenses`,
+      const resp = await fetch(
+        `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses`,
         {
-          data: {
-            type: "licenses",
-            relationships: {
-              policy: {
-                data: { type: "policies", id: policyId },
-              },
-            },
-            attributes: {
-              // optional metadata
-              metadata: {
-                shopify_order_id: String(orderId || ""),
-                email: email || "",
-                tier,
-              },
-            },
-          },
-        },
-        {
+          method: "POST",
           headers: {
-            Authorization: `Bearer ${token}`, // MUST be "prod-...." token value
+            Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
             "Content-Type": "application/vnd.api+json",
-            Accept: "application/vnd.api+json",
+            Accept: "application/vnd.api+json"
           },
+          body: JSON.stringify({
+            data: {
+              type: "licenses",
+              relationships: {
+                policy: {
+                  data: { type: "policies", id: policyId }
+                }
+              },
+              attributes: {
+                metadata: {
+                  tier,
+                  email,
+                  shopify_order_id: String(order.id)
+                }
+              }
+            }
+          })
         }
       );
 
-      const key = resp?.data?.data?.attributes?.key;
-      console.log("🔑 Keygen license created:", key);
+      const data = await resp.json();
+      if (!resp.ok) {
+        console.log("❌ Keygen error:", data);
+        throw new Error("Keygen license creation failed");
+      }
 
-      // ✅ For now we just log the key.
-      // Next step: email it to customer automatically (we can add after this works).
+      console.log("🔑 Keygen license created:", data.data.attributes.key);
       return res.status(200).json({ ok: true });
+
     } catch (err) {
-      console.log("❌ Webhook error:", err.response?.data || err.message);
-      return res.status(500).json({ ok: false });
+      console.log("❌ Webhook error:", err.message);
+      return res.status(200).json({ ok: false });
     }
   }
 );
-
-// quick test route
-router.get("/webhooks/shopify/ping", (req, res) => {
-  res.json({ ok: true, route: "shopify webhook router alive" });
-});
 
 module.exports = router;
