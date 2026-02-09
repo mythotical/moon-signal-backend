@@ -1,113 +1,98 @@
 const express = require("express");
-const axios = require("axios");
 
 const router = express.Router();
 
-// ✅ Verify a license key + return tier
+/**
+ * Verify license key
+ */
 router.post("/license/verify", async (req, res) => {
   try {
     const { licenseKey } = req.body;
+    if (!licenseKey) return res.status(400).json({ ok: false });
 
-    if (!licenseKey) return res.status(400).json({ ok: false, error: "Missing licenseKey" });
-
-    const accountId = process.env.KEYGEN_ACCOUNT_ID;
-    const token = process.env.KEYGEN_TOKEN;
-    if (!accountId) throw new Error("Missing KEYGEN_ACCOUNT_ID env var");
-    if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
-
-    const resp = await axios.post(
-      `https://api.keygen.sh/v1/accounts/${accountId}/licenses/actions/validate-key`,
+    const resp = await fetch(
+      `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses/actions/validate-key`,
       {
-        meta: { key: String(licenseKey).trim() },
-      },
-      {
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
           "Content-Type": "application/vnd.api+json",
-          Accept: "application/vnd.api+json",
+          Accept: "application/vnd.api+json"
         },
+        body: JSON.stringify({ meta: { key: licenseKey.trim() } })
       }
     );
 
-    const valid = resp?.data?.meta?.valid === true;
-    const license = resp?.data?.data;
-    const tier = license?.attributes?.metadata?.tier || "UNKNOWN";
+    const json = await resp.json();
+    if (!json?.meta?.valid) return res.status(401).json({ ok: false });
 
-    if (!valid) return res.status(401).json({ ok: false, error: "Invalid license" });
-
+    const tier = json.data.attributes.metadata?.tier || "UNKNOWN";
     return res.json({ ok: true, tier });
+
   } catch (err) {
-    console.log("❌ verify error:", err.response?.data || err.message);
-    return res.status(401).json({ ok: false, error: "Invalid or expired license key" });
+    console.log("❌ Verify error:", err.message);
+    return res.status(500).json({ ok: false });
   }
 });
 
-// ✅ Activate a machine (1 key = 1 device) using fingerprint
+/**
+ * Activate license to one machine
+ */
 router.post("/license/activate", async (req, res) => {
   try {
     const { licenseKey, machineFingerprint } = req.body;
-
     if (!licenseKey || !machineFingerprint) {
-      return res.status(400).json({ ok: false, error: "Missing licenseKey or machineFingerprint" });
+      return res.status(400).json({ ok: false });
     }
 
-    const accountId = process.env.KEYGEN_ACCOUNT_ID;
-    const token = process.env.KEYGEN_TOKEN;
-    if (!accountId) throw new Error("Missing KEYGEN_ACCOUNT_ID env var");
-    if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
-
-    // 1) validate key
-    const validateResp = await axios.post(
-      `https://api.keygen.sh/v1/accounts/${accountId}/licenses/actions/validate-key`,
-      { meta: { key: String(licenseKey).trim() } },
+    // Validate first
+    const v = await fetch(
+      `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/licenses/actions/validate-key`,
       {
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/vnd.api+json",
-          Accept: "application/vnd.api+json",
+          Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
+          "Content-Type": "application/vnd.api+json"
         },
+        body: JSON.stringify({ meta: { key: licenseKey.trim() } })
       }
     );
 
-    const valid = validateResp?.data?.meta?.valid === true;
-    if (!valid) return res.status(401).json({ ok: false, error: "Invalid license" });
+    const vj = await v.json();
+    if (!vj.meta.valid) return res.status(401).json({ ok: false });
 
-    const licenseId = validateResp?.data?.data?.id; // ✅ this is UUID license ID
-    const tier = validateResp?.data?.data?.attributes?.metadata?.tier || "UNKNOWN";
+    const licenseId = vj.data.id;
+    const tier = vj.data.attributes.metadata?.tier || "UNKNOWN";
 
-    // 2) create machine bound to that license
-    const machineResp = await axios.post(
-      `https://api.keygen.sh/v1/accounts/${accountId}/machines`,
+    const m = await fetch(
+      `https://api.keygen.sh/v1/accounts/${process.env.KEYGEN_ACCOUNT_ID}/machines`,
       {
-        data: {
-          type: "machines",
-          attributes: {
-            fingerprint: String(machineFingerprint),
-          },
-          relationships: {
-            license: {
-              data: { type: "licenses", id: licenseId },
-            },
-          },
-        },
-      },
-      {
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/vnd.api+json",
-          Accept: "application/vnd.api+json",
+          Authorization: `Bearer ${process.env.KEYGEN_TOKEN}`,
+          "Content-Type": "application/vnd.api+json"
         },
+        body: JSON.stringify({
+          data: {
+            type: "machines",
+            attributes: { fingerprint: machineFingerprint },
+            relationships: {
+              license: {
+                data: { type: "licenses", id: licenseId }
+              }
+            }
+          }
+        })
       }
     );
 
-    return res.json({
-      ok: true,
-      tier,
-      machineId: machineResp?.data?.data?.id,
-    });
+    if (!m.ok) return res.status(403).json({ ok: false });
+
+    return res.json({ ok: true, tier });
+
   } catch (err) {
-    console.log("❌ activate error:", err.response?.data || err.message);
-    return res.status(500).json({ ok: false, error: "Activation failed" });
+    console.log("❌ Activate error:", err.message);
+    return res.status(500).json({ ok: false });
   }
 });
 
