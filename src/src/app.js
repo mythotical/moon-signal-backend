@@ -10,25 +10,38 @@ const license = require("./routes/license");
 const app = express();
 app.disable("x-powered-by");
 
-// ✅ CORS for Chrome extension + any site
+/**
+ * ✅ CORS (required for Chrome extension)
+ */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Shopify-Hmac-Sha256, X-Shopify-Topic, X-Shopify-Shop-Domain");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Shopify-Hmac-Sha256");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
-// ✅ Health
+/**
+ * ✅ Health check
+ */
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ Non-webhook routes can use normal JSON parsing
+/**
+ * ✅ JSON for normal routes
+ */
 app.use(express.json());
 
+/**
+ * Existing routes
+ */
 app.use(assist);
 app.use(wallet);
 app.use(contract);
 app.use(feedback);
+
+/**
+ * Shopify webhook + license routes
+ */
 app.use(shopify);
 app.use(license);
 
