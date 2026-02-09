@@ -1,4 +1,3 @@
-// src/app.js
 const express = require("express");
 
 const assist = require("./routes/assist");
@@ -11,28 +10,40 @@ const license = require("./routes/license");
 const app = express();
 app.disable("x-powered-by");
 
-// Health check
+// ✅ CORS for Chrome extension + browser
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, X-Shopify-Hmac-Sha256, X-Shopify-Topic, X-Shopify-Shop-Domain"
+  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// ✅ Health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 /**
- * ✅ Shopify webhooks MUST use RAW body for HMAC verification
- * This MUST be mounted BEFORE express.json()
+ * ✅ Shopify webhooks need RAW body (for HMAC)
+ * MUST be before express.json()
  */
-app.use("/webhooks/shopify", express.raw({ type: "application/json" }));
+app.use("/webhooks/shopify", express.raw({ type: "*/*" }));
 app.use("/webhooks/shopify", shopify);
 
 /**
- * ✅ Normal JSON parsing for everything else
+ * ✅ Normal JSON for everything else
  */
 app.use(express.json());
 
-// Existing API routes (unchanged)
+// Existing routes
 app.use(assist);
 app.use(wallet);
 app.use(contract);
 app.use(feedback);
 
-// ✅ License verification route
+// License routes
 app.use(license);
 
 module.exports = app;
