@@ -1,165 +1,134 @@
-// src/routes/shopify.js
 const express = require("express");
 const crypto = require("crypto");
+const axios = require("axios");
 
 const router = express.Router();
 
-const KEYGEN_BASE = "https://api.keygen.sh/v1";
+// ✅ IMPORTANT: raw body ONLY for Shopify webhook route
+router.post(
+  "/webhooks/shopify/order-paid",
+  express.raw({ type: "*/*" }),
+  async (req, res) => {
+    try {
+      console.log("✅ Webhook hit: POST /webhooks/shopify/order-paid");
 
-/**
- * ✅ Ping route (browser test)
- * https://moon-signal-backend.onrender.com/webhooks/shopify/ping
- */
-router.get("/ping", (req, res) => {
+      const shop = req.get("X-Shopify-Shop-Domain") || "unknown";
+      const topic = req.get("X-Shopify-Topic") || "unknown";
+      console.log("Topic:", topic);
+      console.log("Shop:", shop);
+
+      const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+      if (!secret) throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
+
+      const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
+      if (!hmacHeader) throw new Error("Missing X-Shopify-Hmac-Sha256 header");
+
+      const rawBody = req.body; // Buffer
+      const computed = crypto
+        .createHmac("sha256", secret)
+        .update(rawBody)
+        .digest("base64");
+
+      if (computed !== hmacHeader) {
+        console.log("❌ HMAC mismatch");
+        return res.status(401).send("HMAC verification failed");
+      }
+
+      console.log("✅ Shopify HMAC OK");
+
+      // parse JSON AFTER verifying HMAC
+      const payload = JSON.parse(rawBody.toString("utf8"));
+
+      const orderId = payload?.id;
+      const email = payload?.email || payload?.customer?.email || null;
+      const lineItems = payload?.line_items || [];
+
+      console.log("Order ID:", orderId);
+      console.log("Email:", email);
+      console.log(
+        "Line items:",
+        lineItems.map((x) => ({
+          title: x.title,
+          sku: x.sku ?? null,
+          quantity: x.quantity,
+          price: String(x.price),
+        }))
+      );
+
+      // ✅ decide tier from line items
+      const titles = lineItems.map((i) => String(i.title || "").toUpperCase());
+      const tier =
+        titles.includes("PRO+") ? "PROPLUS" : titles.includes("PRO") ? "PRO" : titles.includes("BASIC") ? "BASIC" : null;
+
+      if (!tier) {
+        console.log("❌ No tier product found in this order");
+        return res.status(200).json({ ok: true, ignored: true });
+      }
+
+      console.log(`✅ Tier: ${tier}`);
+
+      // ✅ choose policy env var
+      const policyId =
+        tier === "BASIC"
+          ? process.env.KEYGEN_POLICY_BASIC
+          : tier === "PRO"
+          ? process.env.KEYGEN_POLICY_PRO
+          : process.env.KEYGEN_POLICY_PROPLUS;
+
+      if (!policyId) throw new Error(`Missing policy env var for tier ${tier}`);
+
+      const accountId = process.env.KEYGEN_ACCOUNT_ID;
+      if (!accountId) throw new Error("Missing KEYGEN_ACCOUNT_ID env var");
+
+      const token = process.env.KEYGEN_TOKEN;
+      if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
+
+      // ✅ Create license in Keygen
+      const resp = await axios.post(
+        `https://api.keygen.sh/v1/accounts/${accountId}/licenses`,
+        {
+          data: {
+            type: "licenses",
+            relationships: {
+              policy: {
+                data: { type: "policies", id: policyId },
+              },
+            },
+            attributes: {
+              // optional metadata
+              metadata: {
+                shopify_order_id: String(orderId || ""),
+                email: email || "",
+                tier,
+              },
+            },
+          },
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`, // MUST be "prod-...." token value
+            "Content-Type": "application/vnd.api+json",
+            Accept: "application/vnd.api+json",
+          },
+        }
+      );
+
+      const key = resp?.data?.data?.attributes?.key;
+      console.log("🔑 Keygen license created:", key);
+
+      // ✅ For now we just log the key.
+      // Next step: email it to customer automatically (we can add after this works).
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      console.log("❌ Webhook error:", err.response?.data || err.message);
+      return res.status(500).json({ ok: false });
+    }
+  }
+);
+
+// quick test route
+router.get("/webhooks/shopify/ping", (req, res) => {
   res.json({ ok: true, route: "shopify webhook router alive" });
-});
-
-/**
- * ✅ Verify Shopify HMAC using RAW body (Buffer)
- * req.body MUST be a Buffer because app.js uses express.raw() on /webhooks/shopify
- */
-function verifyShopifyHmac(req) {
-  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
-  const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
-
-  if (!secret) throw new Error("Missing SHOPIFY_WEBHOOK_SECRET env var");
-  if (!hmacHeader) throw new Error("Missing X-Shopify-Hmac-Sha256 header");
-  if (!req.body || !Buffer.isBuffer(req.body)) {
-    throw new Error("Expected raw Buffer body. Check app.js middleware order.");
-  }
-
-  const digest = crypto
-    .createHmac("sha256", secret)
-    .update(req.body)
-    .digest("base64");
-
-  const a = Buffer.from(digest);
-  const b = Buffer.from(hmacHeader);
-
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    throw new Error("Shopify HMAC verification failed");
-  }
-}
-
-/**
- * ✅ Detect tier from line items (priority: PRO+ > PRO > BASIC)
- */
-function detectTier(lineItems) {
-  const titles = (lineItems || []).map((li) => String(li.title || "").toUpperCase());
-
-  if (titles.some((t) => t.includes("PRO+"))) return "PROPLUS";
-  if (titles.some((t) => t.includes("PRO"))) return "PRO";
-  if (titles.some((t) => t.includes("BASIC"))) return "BASIC";
-
-  return null;
-}
-
-function policyIdForTier(tier) {
-  if (tier === "BASIC") return process.env.KEYGEN_POLICY_BASIC;
-  if (tier === "PRO") return process.env.KEYGEN_POLICY_PRO;
-  if (tier === "PROPLUS") return process.env.KEYGEN_POLICY_PROPLUS;
-  return null;
-}
-
-function keygenHeaders() {
-  const token = process.env.KEYGEN_TOKEN;
-  if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
-
-  return {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/vnd.api+json",
-    Accept: "application/vnd.api+json",
-  };
-}
-
-/**
- * ✅ Shopify webhook endpoint:
- * POST https://moon-signal-backend.onrender.com/webhooks/shopify/order-paid
- */
-router.post("/order-paid", async (req, res) => {
-  try {
-    console.log("✅ Webhook hit: POST /webhooks/shopify/order-paid");
-    console.log("Topic:", req.get("X-Shopify-Topic"));
-    console.log("Shop:", req.get("X-Shopify-Shop-Domain"));
-
-    // 1) Verify Shopify HMAC
-    verifyShopifyHmac(req);
-    console.log("✅ Shopify HMAC OK");
-
-    // 2) Parse the order JSON from RAW buffer
-    const order = JSON.parse(req.body.toString("utf8"));
-
-    console.log("Order ID:", order?.id);
-    console.log("Email:", order?.email);
-
-    const lineItems = (order?.line_items || []).map((li) => ({
-      title: li.title,
-      sku: li.sku,
-      quantity: li.quantity,
-      price: li.price,
-    }));
-
-    console.log("Line items:", lineItems);
-
-    // 3) Pick tier (highest tier wins)
-    const tier = detectTier(lineItems);
-    if (!tier) {
-      console.log("❌ Tier not recognized from line items");
-      return res.status(200).json({ ok: true, note: "Tier not recognized" });
-    }
-    console.log("✅ Tier:", tier);
-
-    // 4) Create Keygen license for that tier
-    const accountId = process.env.KEYGEN_ACCOUNT_ID;
-    if (!accountId) throw new Error("Missing KEYGEN_ACCOUNT_ID env var");
-
-    const policyId = policyIdForTier(tier);
-    if (!policyId) throw new Error(`Missing policy env var for tier ${tier}`);
-
-    const createLicenseUrl = `${KEYGEN_BASE}/accounts/${accountId}/licenses`;
-
-    const payload = {
-      data: {
-        type: "licenses",
-        attributes: {
-          name: `${tier} - ${order?.email || "unknown"}`,
-          metadata: {
-            tier,
-            shopify_order_id: String(order?.id || ""),
-            shopify_email: String(order?.email || ""),
-          },
-        },
-        relationships: {
-          policy: {
-            data: { type: "policies", id: policyId },
-          },
-        },
-      },
-    };
-
-    const kgResp = await fetch(createLicenseUrl, {
-      method: "POST",
-      headers: keygenHeaders(),
-      body: JSON.stringify(payload),
-    });
-
-    const kgJson = await kgResp.json();
-
-    if (!kgResp.ok) {
-      console.log("❌ Keygen error:", kgJson);
-      throw new Error(`Keygen license create failed (${kgResp.status})`);
-    }
-
-    const licenseKey = kgJson?.data?.attributes?.key;
-    console.log("🔑 Keygen license created:", licenseKey);
-
-    // ✅ Respond 200 to Shopify
-    return res.status(200).json({ ok: true, tier });
-  } catch (err) {
-    console.log("❌ Webhook error:", err.message);
-    // Return 200 so Shopify doesn't retry spam while debugging
-    return res.status(200).json({ ok: false, error: err.message });
-  }
 });
 
 module.exports = router;
