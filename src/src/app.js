@@ -4,13 +4,14 @@ const assist = require("./routes/assist");
 const wallet = require("./routes/wallet");
 const contract = require("./routes/contract");
 const feedback = require("./routes/feedback");
+
 const shopify = require("./routes/shopify");
 const license = require("./routes/license");
 
 const app = express();
 app.disable("x-powered-by");
 
-// CORS (extension)
+// ✅ CORS (needed for Chrome extension + browser calls)
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader(
@@ -24,20 +25,18 @@ app.use((req, res, next) => {
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ Shopify needs RAW body for HMAC
-app.use("/webhooks/shopify", express.raw({ type: "*/*" }));
-app.use("/webhooks/shopify", shopify);
+// ✅ Shopify webhook router (uses raw body INSIDE shopify.js)
+app.use(shopify);
 
 // ✅ Everything else uses JSON
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-// Your routes
 app.use(assist);
 app.use(wallet);
 app.use(contract);
 app.use(feedback);
 
-// ✅ License verify route
+// ✅ License verify route for the extension
 app.use(license);
 
 module.exports = app;
