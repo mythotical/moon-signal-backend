@@ -19,8 +19,14 @@ function isValidAddress(address) {
   // Solana - base58 encoded, typically 32-44 chars
   if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return true;
   
-  // Accept other formats for flexibility
-  return address.length >= 20;
+  return false;
+}
+
+// Sanitize user input for error messages to prevent log injection
+function sanitizeForLog(input) {
+  if (!input || typeof input !== 'string') return '';
+  // Truncate and remove control characters
+  return input.slice(0, 100).replace(/[\r\n\t]/g, '');
 }
 
 // Parse Dexscreener URL to extract chain and pair/token
@@ -73,7 +79,12 @@ async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
   if (isToken) {
     // Validate address format for token lookups
     if (!isValidAddress(pairOrToken)) {
-      throw new Error(`Invalid token address format: ${pairOrToken}`);
+      throw new Error(`Invalid token address format: ${sanitizeForLog(pairOrToken)}`);
+    }
+    
+    // Validate length to prevent URL length issues
+    if (pairOrToken.length > 100) {
+      throw new Error('Token address exceeds maximum length');
     }
     
     // For token addresses, use search endpoint to find best pair
@@ -304,7 +315,11 @@ router.get("/decision", async (req, res) => {
     }
 
     // Extract chain and pair address
-    const chain = pair.chainId || parsed.chain;
+    // For token lookups, chain must come from pair data
+    const chain = parsed.isToken 
+      ? pair.chainId 
+      : (pair.chainId || parsed.chain);
+      
     if (!chain) {
       return res.status(400).json({
         ok: false,
@@ -319,17 +334,20 @@ router.get("/decision", async (req, res) => {
     const rug = computeRugRisk(pair);
     const { decision, confidence } = computeDecision(alpha, rug, pair);
 
-    // Extract token info
-    const tokenName = pair.baseToken?.name || pair.token0?.name || "Unknown";
-    const tokenSymbol = pair.baseToken?.symbol || pair.token0?.symbol || "???";
+    // Extract token info (use empty strings for missing data for consistency)
+    const tokenName = pair.baseToken?.name || pair.token0?.name || "";
+    const tokenSymbol = pair.baseToken?.symbol || pair.token0?.symbol || "";
     const mint = pair.baseToken?.address || pair.token0?.address || "";
+
+    // Construct canonical pair URL
+    const pairUrl = pair.url || `https://dexscreener.com/${chain}/${pairAddress}`;
 
     // Return response
     return res.json({
       ok: true,
       chain,
       pair: pairAddress,
-      url: pair.url || url,
+      url: pairUrl,
       decision,
       alpha,
       rug,
