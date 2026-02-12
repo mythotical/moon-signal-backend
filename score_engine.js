@@ -1,5 +1,8 @@
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
+// Hard rug warning threshold (applies to all tiers)
+const RUG_WARNING_THRESHOLD = 82;
+
 // Tier-based thresholds for early-but-safer decision tuning
 const TIER_THRESHOLDS = {
   BASIC: {
@@ -89,8 +92,15 @@ function detectLeadingIndicators(overlay, thresholds) {
   // Sell streak detection (consecutive periods of sell dominance)
   const sellStreakCount = Number(overlay?.sellStreakCount ?? 0);
   
-  // Use sellStreakMax - 2 as minimum threshold (e.g., 3 for BASIC where max is 4)
-  const sellStreakMinThreshold = Math.max(3, thresholds.sellStreakMax - 2);
+  // Use a threshold 2 less than max to trigger earlier warnings
+  // (e.g., 3 for BASIC where max is 4, allowing some headroom before max)
+  // Minimum threshold is 3 to avoid false positives from short-term noise
+  const SELL_STREAK_MIN_THRESHOLD = 3;
+  const SELL_STREAK_OFFSET = 2;
+  const sellStreakMinThreshold = Math.max(
+    SELL_STREAK_MIN_THRESHOLD, 
+    thresholds.sellStreakMax - SELL_STREAK_OFFSET
+  );
   
   if (sellStreakCount >= sellStreakMinThreshold) {
     indicators.sellStreak = true;
@@ -161,7 +171,7 @@ export function computeDecision(overlay, tierInput) {
   
   // Early rug detection for PRO/PROPLUS: use sell streak as leading indicator
   const earlyRugSignal = indicators.sellStreak && (chg5m <= -10 || liqDrop >= 25);
-  const rugTrigger = crashNow || rug >= 82 || (tier !== 'BASIC' && earlyRugSignal && indicators.count >= thresholds.minConfirmations);
+  const rugTrigger = crashNow || rug >= RUG_WARNING_THRESHOLD || (tier !== 'BASIC' && earlyRugSignal && indicators.count >= thresholds.minConfirmations);
 
   if (rugTrigger) {
     const why = [];
