@@ -1,9 +1,26 @@
 const express = require("express");
 const router = express.Router();
 
+// Configuration constants
+const RUG_WARNING_THRESHOLD = 82;
+
 // Helper to clamp values
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
+}
+
+// Validate address format for common chains
+function isValidAddress(address) {
+  if (!address || typeof address !== 'string') return false;
+  
+  // EVM chains (Ethereum, BSC, Polygon, etc.) - 0x followed by 40 hex chars
+  if (/^0x[a-fA-F0-9]{40}$/.test(address)) return true;
+  
+  // Solana - base58 encoded, typically 32-44 chars
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return true;
+  
+  // Accept other formats for flexibility
+  return address.length >= 20;
 }
 
 // Parse Dexscreener URL to extract chain and pair/token
@@ -49,11 +66,16 @@ function parseDexscreenerUrl(url) {
 async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
   const fetchJson = async (url) => {
     const res = await fetch(url, { headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(`Dexscreener HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Dexscreener HTTP ${res.status} for ${url}`);
     return res.json();
   };
 
   if (isToken) {
+    // Validate address format for token lookups
+    if (!isValidAddress(pairOrToken)) {
+      throw new Error(`Invalid token address format: ${pairOrToken}`);
+    }
+    
     // For token addresses, use search endpoint to find best pair
     const searchUrl = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(pairOrToken)}`;
     try {
@@ -183,7 +205,6 @@ function computeDecision(alpha, rug, pair) {
   const chg1h = Number(pair?.priceChange?.h1 ?? 0);
 
   let confidence = 55;
-  const RUG_WARNING_THRESHOLD = 82;
 
   // Hard rug warning
   const crashNow = chg5m <= -18 || chg1h <= -35;
@@ -255,11 +276,24 @@ router.get("/decision", async (req, res) => {
     }
 
     // Fetch pair data
-    const pair = await fetchDexscreenerPair(
-      parsed.chain,
-      parsed.pairOrToken,
-      parsed.isToken
-    );
+    let pair;
+    try {
+      pair = await fetchDexscreenerPair(
+        parsed.chain,
+        parsed.pairOrToken,
+        parsed.isToken
+      );
+    } catch (error) {
+      // Check if it's an address validation error
+      if (error.message && error.message.includes('Invalid token address format')) {
+        return res.status(400).json({
+          ok: false,
+          error: "invalid_token_address",
+          message: error.message
+        });
+      }
+      throw error; // Re-throw other errors to be caught by outer catch
+    }
 
     if (!pair) {
       return res.status(404).json({
@@ -270,7 +304,14 @@ router.get("/decision", async (req, res) => {
     }
 
     // Extract chain and pair address
-    const chain = pair.chainId || parsed.chain || "unknown";
+    const chain = pair.chainId || parsed.chain;
+    if (!chain) {
+      return res.status(400).json({
+        ok: false,
+        error: "chain_not_identified",
+        message: "Could not identify chain from pair data or URL"
+      });
+    }
     const pairAddress = pair.pairAddress || parsed.pairOrToken;
 
     // Compute metrics
