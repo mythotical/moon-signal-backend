@@ -1,6 +1,19 @@
 const express = require("express");
 const router = express.Router();
 
+// Decision thresholds (BASIC tier defaults)
+const ALPHA_BASE_SCORE = 20;
+const RUG_BASE_RISK = 18;
+const CONFIDENCE_BASE_SCORE = 55;
+const RUG_WARNING_THRESHOLD = 82;
+
+// BASIC tier thresholds
+const DECISION_THRESHOLDS = {
+  ENTER: { alpha: 78, rugMax: 60 },
+  READY: { alpha: 70, rugMax: 65 },
+  ARM: { alpha: 62, rugMax: 70 }
+};
+
 // Parse Dexscreener URL to extract chain and pair/token
 function parseDexscreenerUrl(url) {
   if (!url) return null;
@@ -89,7 +102,7 @@ async function fetchPairData(chain, id, isToken = false) {
 
 // Compute alpha score from pair data
 function computeAlphaScore(pair) {
-  let score = 20;
+  let score = ALPHA_BASE_SCORE;
   
   const liq = Number(pair?.liquidity?.usd ?? 0);
   const vol24 = Number(pair?.volume?.h24 ?? 0);
@@ -139,7 +152,7 @@ function computeRugRisk(pair) {
   const t5 = buys5 + sells5;
   const buyRatio5 = t5 > 0 ? buys5 / t5 : 0.5;
   
-  let risk = 18;
+  let risk = RUG_BASE_RISK;
   
   // Base liquidity / structure
   if (liqUsd < 5000) risk += 35;
@@ -174,16 +187,16 @@ function computeRugRisk(pair) {
 // Compute decision based on alpha and rug
 function computeDecision(alpha, rug) {
   // Rug warning threshold
-  if (rug >= 82) {
+  if (rug >= RUG_WARNING_THRESHOLD) {
     return "RUG WARNING";
   }
   
   // Decision thresholds (using BASIC tier as default)
-  if (alpha >= 78 && rug <= 60) {
+  if (alpha >= DECISION_THRESHOLDS.ENTER.alpha && rug <= DECISION_THRESHOLDS.ENTER.rugMax) {
     return "ENTER";
-  } else if (alpha >= 70 && rug <= 65) {
+  } else if (alpha >= DECISION_THRESHOLDS.READY.alpha && rug <= DECISION_THRESHOLDS.READY.rugMax) {
     return "READY";
-  } else if (alpha >= 62 && rug <= 70) {
+  } else if (alpha >= DECISION_THRESHOLDS.ARM.alpha && rug <= DECISION_THRESHOLDS.ARM.rugMax) {
     return "ARM";
   }
   
@@ -192,7 +205,7 @@ function computeDecision(alpha, rug) {
 
 // Compute confidence score
 function computeConfidence(alpha, rug, pair) {
-  let confidence = 55;
+  let confidence = CONFIDENCE_BASE_SCORE;
   
   const liq = Number(pair?.liquidity?.usd ?? 0);
   const vol24 = Number(pair?.volume?.h24 ?? 0);
