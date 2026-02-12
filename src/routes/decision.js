@@ -1,302 +1,367 @@
 const express = require("express");
 const router = express.Router();
 
-// Decision thresholds (BASIC tier defaults)
-const ALPHA_BASE_SCORE = 20;
-const RUG_BASE_RISK = 18;
-const CONFIDENCE_BASE_SCORE = 55;
+// Configuration constants
 const RUG_WARNING_THRESHOLD = 82;
 
-// BASIC tier thresholds
-const DECISION_THRESHOLDS = {
-  ENTER: { alpha: 78, rugMax: 60 },
-  READY: { alpha: 70, rugMax: 65 },
-  ARM: { alpha: 62, rugMax: 70 }
-};
+// Helper to clamp values
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
 
-// Rug risk thresholds
-const CRASH_5M_THRESHOLD = -18;
-const CRASH_1H_THRESHOLD = -35;
-const CRASH_24H_THRESHOLD = -70;
-const MIN_TRANSACTIONS_THRESHOLD = 12;
-const SELL_PRESSURE_THRESHOLD = 0.38;
-const BUY_PRESSURE_THRESHOLD = 0.65;
-const HIGH_VOLUME_THRESHOLD = 300000;
-const LOW_LIQUIDITY_THRESHOLD = 25000;
+// Validate address format for common chains
+function isValidAddress(address) {
+  if (!address || typeof address !== 'string') return false;
+  
+  // EVM chains (Ethereum, BSC, Polygon, etc.) - 0x followed by 40 hex chars
+  if (/^0x[a-fA-F0-9]{40}$/.test(address)) return true;
+  
+  // Solana - base58 encoded, typically 32-44 chars
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return true;
+  
+  return false;
+}
+
+// Sanitize user input for error messages to prevent log injection
+function sanitizeForLog(input) {
+  if (!input || typeof input !== 'string') return '';
+  // Truncate and remove control characters
+  return input.slice(0, 100).replace(/[\r\n\t]/g, '');
+}
 
 // Parse Dexscreener URL to extract chain and pair/token
 function parseDexscreenerUrl(url) {
   if (!url) return null;
-  
+
   try {
     const urlObj = new URL(url);
     
-    // Check if it's a dexscreener.com URL (exact hostname match or subdomain)
-    if (urlObj.hostname !== "dexscreener.com" && !urlObj.hostname.endsWith(".dexscreener.com")) {
-      return null;
-    }
+    // Expected formats:
+    // https://dexscreener.com/solana/ABC123...
+    // https://dexscreener.com/pair/solana/ABC123...
+    // https://dexscreener.com/token/ABC123...
     
-    const parts = urlObj.pathname.split("/").filter(Boolean);
+    const pathname = urlObj.pathname;
+    const parts = pathname.split('/').filter(Boolean);
+    
+    if (parts.length === 0) return null;
     
     // Format: /pair/<chain>/<pair>
-    if (parts[0] === "pair" && parts.length >= 3) {
-      return { chain: parts[1], id: parts[2] };
+    if (parts[0] === 'pair' && parts.length >= 3) {
+      return { chain: parts[1], pairOrToken: parts[2], isPair: true };
     }
     
     // Format: /token/<address>
-    if (parts[0] === "token" && parts.length >= 2) {
-      // For token format, we'll need to search or use the token address as ID
-      // We'll use the token address and try to fetch from API
-      return { chain: null, id: parts[1], isToken: true };
+    if (parts[0] === 'token' && parts.length >= 2) {
+      // Token address - will need to fetch and find best pair
+      return { chain: null, pairOrToken: parts[1], isPair: false, isToken: true };
     }
     
     // Format: /<chain>/<pair>
     if (parts.length >= 2) {
-      return { chain: parts[0], id: parts[1] };
+      return { chain: parts[0], pairOrToken: parts[1], isPair: true };
     }
     
     return null;
-  } catch (err) {
+  } catch (e) {
     return null;
   }
 }
 
 // Fetch pair data from Dexscreener API
-async function fetchPairData(chain, id, isToken = false) {
-  const headers = { accept: "application/json" };
-  
+async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
+  const fetchJson = async (url) => {
+    const res = await fetch(url, { headers: { accept: "application/json" } });
+    if (!res.ok) {
+      // Don't expose full URL in error message to prevent information disclosure
+      throw new Error(`Dexscreener HTTP ${res.status}`);
+    }
+    return res.json();
+  };
+
   if (isToken) {
-    // Try token endpoint - format: https://api.dexscreener.com/latest/dex/tokens/<address>
-    const tokenUrl = `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(id)}`;
+    // Validate address format for token lookups
+    if (!isValidAddress(pairOrToken)) {
+      throw new Error(`Invalid token address format: ${sanitizeForLog(pairOrToken)}`);
+    }
+    
+    // Validate length to prevent URL length issues (Dexscreener has reasonable limits)
+    if (pairOrToken.length > 100) {
+      throw new Error('Token address exceeds maximum length');
+    }
+    
+    // For token addresses, use search endpoint to find best pair
+    // Note: This uses Dexscreener's public search API with their rate limits
+    const searchUrl = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(pairOrToken)}`;
     try {
-      const res = await fetch(tokenUrl, { headers });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
+      const json = await fetchJson(searchUrl);
+      const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
+      if (pairs.length === 0) return null;
       
-      // Token endpoint returns { pairs: [...] }
-      if (json?.pairs && Array.isArray(json.pairs) && json.pairs.length > 0) {
-        // Sort by liquidity and return the most liquid pair
-        const sorted = json.pairs.sort((a, b) => 
-          (b?.liquidity?.usd ?? 0) - (a?.liquidity?.usd ?? 0)
-        );
-        return sorted[0];
-      }
-    } catch (err) {
-      // Continue to fallback
+      // Sort by liquidity and return best pair
+      pairs.sort((a, b) => (b?.liquidity?.usd ?? 0) - (a?.liquidity?.usd ?? 0));
+      return pairs[0];
+    } catch (e) {
+      return null;
     }
   }
-  
-  // Try pair endpoint - format: https://api.dexscreener.com/latest/dex/pairs/<chain>/<pair>
-  if (chain && id) {
-    const pairUrl = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(chain)}/${encodeURIComponent(id)}`;
-    try {
-      const res = await fetch(pairUrl, { headers });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      
-      if (json?.pair) {
-        return json.pair;
-      }
-      
-      // Some endpoints return { pairs: [...] }
-      if (json?.pairs && Array.isArray(json.pairs) && json.pairs.length > 0) {
-        return json.pairs[0];
-      }
-    } catch (err) {
-      // Continue to fallback
-    }
+
+  // Validate chain parameter for API requests
+  const validChains = ['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'base', 
+                       'avalanche', 'solana', 'sui', 'aptos', 'fantom', 'cronos'];
+  if (chain && !validChains.includes(chain.toLowerCase())) {
+    // Allow unknown chains but log for monitoring
+    console.warn(`Unknown chain identifier: ${sanitizeForLog(chain)}`);
   }
-  
-  return null;
+
+  // Try standard pair endpoint first (latest API version)
+  const pairUrl = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(chain)}/${encodeURIComponent(pairOrToken)}`;
+  try {
+    const json = await fetchJson(pairUrl);
+    if (json?.pair) return json.pair;
+    if (json?.pairs && Array.isArray(json.pairs) && json.pairs.length > 0) {
+      return json.pairs[0];
+    }
+  } catch (e) {
+    // Fall through to try token endpoint
+  }
+
+  // Try token endpoint as fallback
+  // Note: This uses v1 API (legacy endpoint still supported by Dexscreener)
+  // while pair endpoint uses 'latest'. This is Dexscreener's API design.
+  const tokenUrl = `https://api.dexscreener.com/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(pairOrToken)}`;
+  try {
+    const pools = await fetchJson(tokenUrl);
+    if (!Array.isArray(pools) || pools.length === 0) return null;
+    pools.sort((a, b) => (b?.liquidity?.usd ?? 0) - (a?.liquidity?.usd ?? 0));
+    return pools[0];
+  } catch (e) {
+    return null;
+  }
 }
 
-// Compute alpha score from pair data
+// Compute alpha score from pair data (based on scoring.js logic)
 function computeAlphaScore(pair) {
-  let score = ALPHA_BASE_SCORE;
-  
-  const liq = Number(pair?.liquidity?.usd ?? 0);
+  let score = 20;
+
+  const liqUsd = Number(pair?.liquidity?.usd ?? 0);
   const vol24 = Number(pair?.volume?.h24 ?? 0);
   const chg1h = Number(pair?.priceChange?.h1 ?? 0);
   const chg24h = Number(pair?.priceChange?.h24 ?? 0);
-  
+
   // Liquidity scoring
-  if (liq >= 100000) score += 18;
-  else if (liq >= 50000) score += 14;
-  else if (liq >= 20000) score += 10;
-  else if (liq >= 10000) score += 6;
-  else if (liq >= 5000) score += 3;
+  if (liqUsd >= 100000) score += 18;
+  else if (liqUsd >= 50000) score += 14;
+  else if (liqUsd >= 20000) score += 10;
+  else if (liqUsd >= 10000) score += 6;
+  else if (liqUsd >= 5000) score += 3;
   else score -= 4;
-  
+
   // Volume scoring
   if (vol24 >= 500000) score += 12;
   else if (vol24 >= 200000) score += 9;
   else if (vol24 >= 100000) score += 7;
   else if (vol24 >= 25000) score += 4;
   else score -= 2;
-  
-  // Momentum scoring
+
+  // Price momentum
   if (chg1h >= 80) score += 8;
   else if (chg1h >= 30) score += 5;
   else if (chg1h <= -40) score -= 6;
-  
+
   if (chg24h >= 200) score += 6;
   else if (chg24h <= -60) score -= 6;
-  
-  return Math.max(0, Math.min(100, Math.round(score)));
+
+  return clamp(score, 0, 100);
 }
 
-// Compute rug risk from pair data
+// Compute rug risk from pair data (based on rugrisk.js logic)
 function computeRugRisk(pair) {
-  function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
-  
   const liqUsd = Number(pair?.liquidity?.usd ?? 0);
   const vol24 = Number(pair?.volume?.h24 ?? 0);
   const fdv = Number(pair?.fdv ?? 0);
-  
   const chg5m = Number(pair?.priceChange?.m5 ?? 0);
   const chg1h = Number(pair?.priceChange?.h1 ?? 0);
   const chg24h = Number(pair?.priceChange?.h24 ?? 0);
-  
+
   const buys5 = Number(pair?.txns?.m5?.buys ?? 0);
   const sells5 = Number(pair?.txns?.m5?.sells ?? 0);
   const t5 = buys5 + sells5;
   const buyRatio5 = t5 > 0 ? buys5 / t5 : 0.5;
-  
-  let risk = RUG_BASE_RISK;
-  
-  // Base liquidity / structure
+
+  let risk = 18;
+
+  // Base liquidity
   if (liqUsd < 5000) risk += 35;
   else if (liqUsd < 10000) risk += 26;
   else if (liqUsd < 25000) risk += 14;
-  
+
+  // FDV/LP ratio
   if (fdv > 0 && liqUsd > 0) {
     const ratio = fdv / liqUsd;
     if (ratio >= 500) risk += 22;
     else if (ratio >= 250) risk += 14;
   }
-  
+
   // Crash detection
-  const crash5m = chg5m <= CRASH_5M_THRESHOLD;
-  const crash1h = chg1h <= CRASH_1H_THRESHOLD;
-  const crash24 = chg24h <= CRASH_24H_THRESHOLD;
-  
+  const crash5m = chg5m <= -18;
+  const crash1h = chg1h <= -35;
+  const crash24 = chg24h <= -70;
+
   if (crash5m) risk += 32;
   if (crash1h) risk += 28;
   if (crash24) risk += 22;
-  
+
   // Sell pressure
-  if (t5 >= MIN_TRANSACTIONS_THRESHOLD && buyRatio5 <= SELL_PRESSURE_THRESHOLD) risk += 18;
-  else if (t5 >= MIN_TRANSACTIONS_THRESHOLD && buyRatio5 >= BUY_PRESSURE_THRESHOLD) risk -= 6;
-  
-  // Volume without liquidity support
-  if (vol24 >= HIGH_VOLUME_THRESHOLD && liqUsd < LOW_LIQUIDITY_THRESHOLD) risk += 14;
-  
+  if (t5 >= 12 && buyRatio5 <= 0.38) risk += 18;
+  else if (t5 >= 12 && buyRatio5 >= 0.65) risk -= 6;
+
+  // Volume without liquidity
+  if (vol24 >= 300000 && liqUsd < 25000) risk += 14;
+
   return clamp(risk, 0, 100);
 }
 
-// Compute decision based on alpha and rug
-function computeDecision(alpha, rug) {
-  // Rug warning threshold
-  if (rug >= RUG_WARNING_THRESHOLD) {
-    return "RUG WARNING";
-  }
-  
-  // Decision thresholds (using BASIC tier as default)
-  if (alpha >= DECISION_THRESHOLDS.ENTER.alpha && rug <= DECISION_THRESHOLDS.ENTER.rugMax) {
-    return "ENTER";
-  } else if (alpha >= DECISION_THRESHOLDS.READY.alpha && rug <= DECISION_THRESHOLDS.READY.rugMax) {
-    return "READY";
-  } else if (alpha >= DECISION_THRESHOLDS.ARM.alpha && rug <= DECISION_THRESHOLDS.ARM.rugMax) {
-    return "ARM";
-  }
-  
-  return "WAIT";
-}
-
-// Compute confidence score
-function computeConfidence(alpha, rug, pair) {
-  let confidence = CONFIDENCE_BASE_SCORE;
-  
+// Compute decision and confidence (simplified version of score_engine.js logic)
+function computeDecision(alpha, rug, pair) {
   const liq = Number(pair?.liquidity?.usd ?? 0);
-  const vol24 = Number(pair?.volume?.h24 ?? 0);
-  
-  // Rug risk gradient
+  const vol = Number(pair?.volume?.h24 ?? 0);
+  const chg5m = Number(pair?.priceChange?.m5 ?? 0);
+  const chg1h = Number(pair?.priceChange?.h1 ?? 0);
+
+  let confidence = 55;
+
+  // Hard rug warning
+  const crashNow = chg5m <= -18 || chg1h <= -35;
+  if (crashNow || rug >= RUG_WARNING_THRESHOLD) {
+    return {
+      decision: "RUG WARNING",
+      confidence: 98
+    };
+  }
+
+  // Confidence adjustments
   if (rug <= 35) confidence += 10;
   else if (rug >= 65) confidence -= 16;
-  
-  // Alpha score
+
   if (alpha >= 85) confidence += 18;
   else if (alpha >= 78) confidence += 10;
   else if (alpha < 60) confidence -= 12;
-  
-  // Liquidity / volume
+
   if (liq >= 50000) confidence += 10;
   else if (liq >= 15000) confidence += 4;
   else confidence -= 12;
-  
-  if (vol24 >= 250000) confidence += 10;
-  else if (vol24 >= 120000) confidence += 6;
-  else if (vol24 > 0 && vol24 < 60000) confidence -= 8;
-  
-  return Math.max(1, Math.min(99, confidence));
+
+  if (vol >= 250000) confidence += 10;
+  else if (vol >= 120000) confidence += 6;
+  else if (vol > 0 && vol < 60000) confidence -= 8;
+
+  confidence = clamp(confidence, 1, 99);
+
+  // Decision logic (simplified)
+  let decision = "WAIT";
+
+  // Basic thresholds for PRO tier (middle ground)
+  if (alpha >= 58 && rug <= 75) {
+    decision = "ARM";
+  }
+
+  if (alpha >= 65 && rug <= 70 && (chg5m > 0 || chg1h > 5)) {
+    decision = "READY";
+  }
+
+  if (alpha >= 72 && rug <= 65 && chg5m > 0 && liq >= 30000 && vol >= 80000) {
+    decision = "ENTER";
+  }
+
+  return { decision, confidence };
 }
 
-// GET /decision endpoint
+// GET /decision?url=<dexscreener url>
 router.get("/decision", async (req, res) => {
-  const { url } = req.query;
-  
-  // Validate URL parameter
-  if (!url) {
-    return res.status(400).json({ 
-      ok: false, 
-      error: "missing_url",
-      message: "URL parameter is required" 
-    });
-  }
-  
-  // Parse Dexscreener URL
-  const parsed = parseDexscreenerUrl(url);
-  if (!parsed) {
-    return res.status(400).json({ 
-      ok: false, 
-      error: "invalid_url",
-      message: "Invalid Dexscreener URL format" 
-    });
-  }
-  
   try {
-    // Fetch pair data from Dexscreener API
-    const pair = await fetchPairData(parsed.chain, parsed.id, parsed.isToken);
-    
-    if (!pair) {
-      return res.status(404).json({ 
-        ok: false, 
-        error: "pair_not_found",
-        message: "Pair data not found for the provided URL" 
+    const url = req.query.url;
+
+    if (!url) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_url",
+        message: "URL parameter is required"
       });
     }
-    
-    // Extract chain and pair info from the fetched data
-    const chain = pair.chainId || parsed.chain || "";
-    const pairAddress = pair.pairAddress || parsed.id || "";
-    
+
+    // Parse the URL
+    const parsed = parseDexscreenerUrl(url);
+    if (!parsed) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_url",
+        message: "Invalid Dexscreener URL format"
+      });
+    }
+
+    // Fetch pair data
+    let pair;
+    try {
+      pair = await fetchDexscreenerPair(
+        parsed.chain,
+        parsed.pairOrToken,
+        parsed.isToken
+      );
+    } catch (error) {
+      // Check if it's an address validation error
+      if (error.message && error.message.includes('Invalid token address format')) {
+        return res.status(400).json({
+          ok: false,
+          error: "invalid_token_address",
+          message: error.message
+        });
+      }
+      throw error; // Re-throw other errors to be caught by outer catch
+    }
+
+    if (!pair) {
+      return res.status(404).json({
+        ok: false,
+        error: "pair_not_found",
+        message: "Could not find pair data from Dexscreener"
+      });
+    }
+
+    // Extract chain and pair address
+    // For token lookups, chain must come from pair data
+    const chain = parsed.isToken 
+      ? pair.chainId 
+      : (pair.chainId || parsed.chain);
+      
+    if (!chain) {
+      return res.status(400).json({
+        ok: false,
+        error: "chain_not_identified",
+        message: "Could not identify chain from pair data or URL"
+      });
+    }
+    const pairAddress = pair.pairAddress || parsed.pairOrToken;
+
     // Compute metrics
     const alpha = computeAlphaScore(pair);
     const rug = computeRugRisk(pair);
-    const decision = computeDecision(alpha, rug);
-    const confidence = computeConfidence(alpha, rug, pair);
-    
-    // Extract token info
-    const tokenName = pair.baseToken?.name || "";
-    const tokenSymbol = pair.baseToken?.symbol || "";
-    const mint = pair.baseToken?.address || "";
-    
+    const { decision, confidence } = computeDecision(alpha, rug, pair);
+
+    // Extract token info (use empty strings for missing data for consistency)
+    const tokenName = pair.baseToken?.name || pair.token0?.name || "";
+    const tokenSymbol = pair.baseToken?.symbol || pair.token0?.symbol || "";
+    const mint = pair.baseToken?.address || pair.token0?.address || "";
+
+    // Construct canonical pair URL
+    const pairUrl = pair.url || `https://dexscreener.com/${chain}/${pairAddress}`;
+
     // Return response
     return res.json({
       ok: true,
       chain,
       pair: pairAddress,
-      url,
+      url: pairUrl,
       decision,
       alpha,
       rug,
@@ -305,13 +370,13 @@ router.get("/decision", async (req, res) => {
       tokenSymbol,
       mint
     });
-    
-  } catch (err) {
-    console.error("Decision endpoint error:", err);
-    return res.status(500).json({ 
-      ok: false, 
+
+  } catch (error) {
+    console.error("Error in /decision endpoint:", error);
+    return res.status(500).json({
+      ok: false,
       error: "internal_error",
-      message: "Failed to compute decision" 
+      message: "An internal error occurred while processing the request"
     });
   }
 });
