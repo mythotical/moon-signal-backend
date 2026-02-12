@@ -44,7 +44,7 @@ const TIER_THRESHOLDS = {
 };
 
 // Detect leading indicators for early signal generation
-function detectLeadingIndicators(overlay) {
+function detectLeadingIndicators(overlay, thresholds) {
   const indicators = {
     buyRatioAccel: false,
     txAccel: false,
@@ -62,7 +62,7 @@ function detectLeadingIndicators(overlay) {
   const buyRatioPrev = Number(overlay?.buyRatioPrev ?? 0.5);
   const buyRatioAccel = buyRatio - buyRatioPrev;
   
-  if (buyRatioAccel > 0.15) {
+  if (buyRatioAccel > thresholds.buyRatioAccelMin) {
     indicators.buyRatioAccel = true;
     indicators.count++;
   }
@@ -71,7 +71,7 @@ function detectLeadingIndicators(overlay) {
   const tx5Prev = Number(overlay?.tx5mPrev ?? 0);
   const txAccelRatio = tx5Prev > 0 ? tx5 / tx5Prev : 1;
   
-  if (txAccelRatio >= 1.5) {
+  if (txAccelRatio >= thresholds.txAccelThreshold) {
     indicators.txAccel = true;
     indicators.count++;
   }
@@ -81,7 +81,7 @@ function detectLeadingIndicators(overlay) {
   const vol5mBaseline = Number(overlay?.volume5mBaseline ?? vol5m);
   const volumeSurgeRatio = vol5mBaseline > 0 ? vol5m / vol5mBaseline : 1;
   
-  if (volumeSurgeRatio >= 2.5) {
+  if (volumeSurgeRatio >= thresholds.volumeSurgeMultiplier) {
     indicators.volumeSurge = true;
     indicators.count++;
   }
@@ -89,7 +89,10 @@ function detectLeadingIndicators(overlay) {
   // Sell streak detection (consecutive periods of sell dominance)
   const sellStreakCount = Number(overlay?.sellStreakCount ?? 0);
   
-  if (sellStreakCount >= 3) {
+  // Use sellStreakMax - 2 as minimum threshold (e.g., 3 for BASIC where max is 4)
+  const sellStreakMinThreshold = Math.max(3, thresholds.sellStreakMax - 2);
+  
+  if (sellStreakCount >= sellStreakMinThreshold) {
     indicators.sellStreak = true;
     indicators.count++;
   }
@@ -147,7 +150,7 @@ export function computeDecision(overlay, tierInput) {
   const entry = overlay?.entryZone || { zone: "NEUTRAL", entryScore: 60 };
 
   // Detect leading indicators for early signals
-  const indicators = detectLeadingIndicators(overlay);
+  const indicators = detectLeadingIndicators(overlay, thresholds);
 
   const reasons = [];
   let confidence = 55;
