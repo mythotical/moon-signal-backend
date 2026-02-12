@@ -72,7 +72,10 @@ function parseDexscreenerUrl(url) {
 async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
   const fetchJson = async (url) => {
     const res = await fetch(url, { headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(`Dexscreener HTTP ${res.status} for ${url}`);
+    if (!res.ok) {
+      // Don't expose full URL in error message to prevent information disclosure
+      throw new Error(`Dexscreener HTTP ${res.status}`);
+    }
     return res.json();
   };
 
@@ -82,12 +85,13 @@ async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
       throw new Error(`Invalid token address format: ${sanitizeForLog(pairOrToken)}`);
     }
     
-    // Validate length to prevent URL length issues
+    // Validate length to prevent URL length issues (Dexscreener has reasonable limits)
     if (pairOrToken.length > 100) {
       throw new Error('Token address exceeds maximum length');
     }
     
     // For token addresses, use search endpoint to find best pair
+    // Note: This uses Dexscreener's public search API with their rate limits
     const searchUrl = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(pairOrToken)}`;
     try {
       const json = await fetchJson(searchUrl);
@@ -102,7 +106,15 @@ async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
     }
   }
 
-  // Try standard pair endpoint first
+  // Validate chain parameter for API requests
+  const validChains = ['ethereum', 'bsc', 'polygon', 'arbitrum', 'optimism', 'base', 
+                       'avalanche', 'solana', 'sui', 'aptos', 'fantom', 'cronos'];
+  if (chain && !validChains.includes(chain.toLowerCase())) {
+    // Allow unknown chains but log for monitoring
+    console.warn(`Unknown chain identifier: ${sanitizeForLog(chain)}`);
+  }
+
+  // Try standard pair endpoint first (latest API version)
   const pairUrl = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(chain)}/${encodeURIComponent(pairOrToken)}`;
   try {
     const json = await fetchJson(pairUrl);
@@ -115,6 +127,8 @@ async function fetchDexscreenerPair(chain, pairOrToken, isToken = false) {
   }
 
   // Try token endpoint as fallback
+  // Note: This uses v1 API (legacy endpoint still supported by Dexscreener)
+  // while pair endpoint uses 'latest'. This is Dexscreener's API design.
   const tokenUrl = `https://api.dexscreener.com/token-pairs/v1/${encodeURIComponent(chain)}/${encodeURIComponent(pairOrToken)}`;
   try {
     const pools = await fetchJson(tokenUrl);
