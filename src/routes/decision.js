@@ -8,8 +8,8 @@ function parseDexscreenerUrl(url) {
   try {
     const urlObj = new URL(url);
     
-    // Check if it's a dexscreener.com URL
-    if (!urlObj.hostname.includes("dexscreener.com")) {
+    // Check if it's a dexscreener.com URL (exact hostname match or subdomain)
+    if (urlObj.hostname !== "dexscreener.com" && !urlObj.hostname.endsWith(".dexscreener.com")) {
       return null;
     }
     
