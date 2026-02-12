@@ -2,6 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const shopifyRouter = require("./routes/shopify");
 
 const app = express();
 
@@ -62,6 +63,9 @@ app.use((req, res, next) => {
 
   next();
 });
+
+// Mount Shopify webhook routes with raw body middleware for HMAC verification
+app.use("/webhooks/shopify", express.raw({ type: "application/json" }), shopifyRouter);
 
 app.use(express.json({ limit: "200kb" }));
 
