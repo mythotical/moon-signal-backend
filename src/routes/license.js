@@ -114,8 +114,8 @@ async function keygenValidate({ accountId, token, licenseKey }) {
  */
 router.post("/license/verify", async (req, res) => {
   try {
-    const licenseKey = String(req.body?.licenseKey || "").trim();
-    if (!licenseKey) return res.status(400).json({ ok: false, error: "Missing licenseKey" });
+    const licenseKey = String(req.body?.licenseKey || req.body?.key || "").trim();
+    if (!licenseKey) return res.status(400).json({ ok: false, error: "Missing licenseKey or key" });
 
     const accountId = process.env.KEYGEN_ACCOUNT_ID;
     const token = process.env.KEYGEN_TOKEN;

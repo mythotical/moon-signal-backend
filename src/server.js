@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const shopifyRouter = require("./routes/shopify");
+const licenseRouter = require("./routes/license");
 
 const app = express();
 
@@ -68,6 +69,9 @@ app.use((req, res, next) => {
 app.use("/webhooks/shopify", express.raw({ type: "application/json" }), shopifyRouter);
 
 app.use(express.json({ limit: "200kb" }));
+
+// Mount license routes
+app.use(licenseRouter);
 
 // --- License/Auth Gate ---
 // Set env var: MS_LICENSE_KEYS="KEY1,KEY2,KEY3"
