@@ -73,10 +73,6 @@ app.use(express.json({ limit: "200kb" }));
 
 // Mount license routes
 app.use(licenseRouter);
-
-// Mount decision route
-app.use(decisionRouter);
-
 // --- License/Auth Gate ---
 // Set env var: MS_LICENSE_KEYS="KEY1,KEY2,KEY3"
 // If not set, server runs in open mode.
@@ -537,5 +533,4 @@ app.get("/feedback/recent", requireLicense, (req, res) => {
   const limit = Math.min(200, Number(req.query.limit || 50));
   res.json({ feedback: feedback.slice(0, limit) });
 });
-
 module.exports = app;
