@@ -14,6 +14,16 @@ const DECISION_THRESHOLDS = {
   ARM: { alpha: 62, rugMax: 70 }
 };
 
+// Rug risk thresholds
+const CRASH_5M_THRESHOLD = -18;
+const CRASH_1H_THRESHOLD = -35;
+const CRASH_24H_THRESHOLD = -70;
+const MIN_TRANSACTIONS_THRESHOLD = 12;
+const SELL_PRESSURE_THRESHOLD = 0.38;
+const BUY_PRESSURE_THRESHOLD = 0.65;
+const HIGH_VOLUME_THRESHOLD = 300000;
+const LOW_LIQUIDITY_THRESHOLD = 25000;
+
 // Parse Dexscreener URL to extract chain and pair/token
 function parseDexscreenerUrl(url) {
   if (!url) return null;
@@ -166,20 +176,20 @@ function computeRugRisk(pair) {
   }
   
   // Crash detection
-  const crash5m = chg5m <= -18;
-  const crash1h = chg1h <= -35;
-  const crash24 = chg24h <= -70;
+  const crash5m = chg5m <= CRASH_5M_THRESHOLD;
+  const crash1h = chg1h <= CRASH_1H_THRESHOLD;
+  const crash24 = chg24h <= CRASH_24H_THRESHOLD;
   
   if (crash5m) risk += 32;
   if (crash1h) risk += 28;
   if (crash24) risk += 22;
   
   // Sell pressure
-  if (t5 >= 12 && buyRatio5 <= 0.38) risk += 18;
-  else if (t5 >= 12 && buyRatio5 >= 0.65) risk -= 6;
+  if (t5 >= MIN_TRANSACTIONS_THRESHOLD && buyRatio5 <= SELL_PRESSURE_THRESHOLD) risk += 18;
+  else if (t5 >= MIN_TRANSACTIONS_THRESHOLD && buyRatio5 >= BUY_PRESSURE_THRESHOLD) risk -= 6;
   
   // Volume without liquidity support
-  if (vol24 >= 300000 && liqUsd < 25000) risk += 14;
+  if (vol24 >= HIGH_VOLUME_THRESHOLD && liqUsd < LOW_LIQUIDITY_THRESHOLD) risk += 14;
   
   return clamp(risk, 0, 100);
 }
