@@ -380,5 +380,3 @@ router.get("/decision", async (req, res) => {
     });
   }
 });
-
-module.exports = router;
