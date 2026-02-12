@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const shopifyRouter = require("./routes/shopify");
 const licenseRouter = require("./routes/license");
+const decisionRouter = require("./routes/decision");
 
 const app = express();
 
@@ -72,6 +73,9 @@ app.use(express.json({ limit: "200kb" }));
 
 // Mount license routes
 app.use(licenseRouter);
+
+// Mount decision routes
+app.use(decisionRouter);
 
 // --- License/Auth Gate ---
 // Set env var: MS_LICENSE_KEYS="KEY1,KEY2,KEY3"
