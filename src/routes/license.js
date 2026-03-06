@@ -138,4 +138,75 @@ router.post("/license/verify", async (req, res) => {
   }
 });
 
+/**
+ * POST /license/trial
+ * Body: { email: "user@example.com" } (optional)
+ * Generates a 7-day free trial license key via the Keygen "Obsidian 7-Day Free Trial" policy.
+ * Returns: { ok, key, license }
+ */
+router.post("/license/trial", async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ ok: false, error: "Invalid email format" });
+    }
+
+    const accountId = process.env.KEYGEN_ACCOUNT_ID;
+    const token = process.env.KEYGEN_TOKEN;
+    const policyId = process.env.KEYGEN_POLICY_ObsidianTrial;
+
+    if (!accountId) throw new Error("Missing KEYGEN_ACCOUNT_ID env var");
+    if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
+    if (!policyId) throw new Error("Missing KEYGEN_POLICY_ObsidianTrial env var");
+
+    const body = {
+      data: {
+        type: "licenses",
+        attributes: {
+          metadata: {
+            tier: "BASIC",
+            source: "trial",
+            customer_email: email,
+          },
+        },
+        relationships: {
+          policy: {
+            data: {
+              type: "policies",
+              id: policyId,
+            },
+          },
+        },
+      },
+    };
+
+    const apiRes = await fetch(
+      `https://api.keygen.sh/v1/accounts/${accountId}/licenses`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/vnd.api+json",
+          Accept: "application/vnd.api+json",
+        },
+        body: JSON.stringify(body),
+      }
+    );
+
+    const json = await apiRes.json().catch(() => ({}));
+    if (!apiRes.ok) {
+      const errMsg = json?.errors?.[0]?.detail || "Failed to create trial license";
+      throw new Error(errMsg);
+    }
+
+    const key = json?.data?.attributes?.key;
+    console.log("🔑 Trial license key generated:", key);
+
+    return res.json({ ok: true, key, license: json.data });
+  } catch (e) {
+    console.log("❌ /license/trial error:", e.message);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 module.exports = router;
