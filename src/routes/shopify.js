@@ -22,6 +22,7 @@ function verifyShopifyHmac(rawBodyBuffer, hmacHeader, secret) {
 function pickTierFromLineItems(lineItems) {
   // prioritize highest tier
   const titles = (lineItems || []).map((li) => String(li.title || "").trim().toUpperCase());
+  if (titles.includes("OBSIDIAN 7-DAY FREE TRIAL")) return "TRIAL";
   if (titles.includes("PRO+") || titles.includes("PROPLUS")) return "PROPLUS";
   if (titles.includes("PRO")) return "PRO";
   if (titles.includes("BASIC")) return "BASIC";
@@ -128,7 +129,9 @@ router.post("/order-paid", async (req, res) => {
     if (!token) throw new Error("Missing KEYGEN_TOKEN env var");
 
     const policyId =
-      tier === "BASIC"
+      tier === "TRIAL"
+        ? process.env.KEYGEN_POLICY_ObsidianTrial
+        : tier === "BASIC"
         ? process.env.KEYGEN_POLICY_BASIC
         : tier === "PRO"
         ? process.env.KEYGEN_POLICY_PRO
@@ -136,16 +139,22 @@ router.post("/order-paid", async (req, res) => {
 
     if (!policyId) throw new Error(`Missing policy env var for tier ${tier}`);
 
+    const metaTier = tier === "TRIAL" ? "BASIC" : tier;
+
     const licenseKey = await keygenCreateLicense({
       accountId,
       token,
       policyId,
-      tier,
+      tier: metaTier,
       email,
       orderId,
     });
 
     console.log("🔑 Keygen license created:", licenseKey);
+    if (tier === "TRIAL") {
+      console.log("🆓 Trial key for Obsidian 7-Day Free Trial");
+      console.log("📧 Customer:", email);
+    }
     console.log("✅ Tier:", tier);
 
     return res.status(200).json({ ok: true });
