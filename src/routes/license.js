@@ -164,7 +164,7 @@ router.post("/license/trial", async (req, res) => {
         type: "licenses",
         attributes: {
           metadata: {
-            tier: "BASIC",
+            tier: "PROPLUS",
             source: "trial",
             customer_email: email,
           },
