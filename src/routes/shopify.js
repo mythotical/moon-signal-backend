@@ -139,7 +139,7 @@ router.post("/order-paid", async (req, res) => {
 
     if (!policyId) throw new Error(`Missing policy env var for tier ${tier}`);
 
-    const metaTier = tier === "TRIAL" ? "BASIC" : tier;
+    const metaTier = tier === "TRIAL" ? "PROPLUS" : tier;
 
     const licenseKey = await keygenCreateLicense({
       accountId,
